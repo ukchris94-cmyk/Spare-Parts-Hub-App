@@ -1,0 +1,47 @@
+name: Configure app via Ansible
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ansible:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform (for outputs only)
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Get instance IP from state
+        id: tf-output
+        working-directory: infra/terraform
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+        run: terraform output -raw instance_public_ip > /tmp/instance_ip
+
+      - name: Install Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible
+
+      - name: Configure SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AWS_SSH_PRIVATE_KEY }}" > ~/.ssh/aws_deploy_key
+          chmod 600 ~/.ssh/aws_deploy_key
+        shell: bash
+
+      - name: Run Ansible playbook
+        run: |
+          INSTANCE_IP=$(cat /tmp/instance_ip)
+          echo "[app]" > infra/ansible/inventory.dynamic
+          echo "$INSTANCE_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/aws_deploy_key" >> infra/ansible/inventory.dynamic
+
+          ansible-playbook \
+            -i infra/ansible/inventory.dynamic \
+            infra/ansible/site.yml
