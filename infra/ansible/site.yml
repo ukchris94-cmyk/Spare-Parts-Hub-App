@@ -17,7 +17,7 @@
         name:
           - git
           - nginx
-          - {{ nodejs_package }}
+          - "{{ nodejs_package }}"
           - npm
         state: present
 
