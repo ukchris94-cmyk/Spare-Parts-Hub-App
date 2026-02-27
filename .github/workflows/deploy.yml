@@ -1,0 +1,77 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    outputs:
+      instance_ip: ${{ steps.tf-output.outputs.instance_ip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform Init
+        working-directory: infra/terraform
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: infra/terraform
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+        run: terraform apply -auto-approve
+
+      - name: Get instance IP
+        id: tf-output
+        working-directory: infra/terraform
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+        run: echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
+
+  ansible:
+    runs-on: ubuntu-latest
+    needs: terraform
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible
+
+      - name: Configure SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AWS_SSH_PRIVATE_KEY }}" > ~/.ssh/aws_deploy_key
+          chmod 600 ~/.ssh/aws_deploy_key
+        shell: bash
+
+      - name: Run Ansible playbook
+        env:
+          INSTANCE_IP: ${{ needs.terraform.outputs.instance_ip }}
+        run: |
+          echo "[app]" > infra/ansible/inventory.dynamic
+          echo "$INSTANCE_IP ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/aws_deploy_key" >> infra/ansible/inventory.dynamic
+
+          ansible-playbook \
+            -i infra/ansible/inventory.dynamic \
+            infra/ansible/playbooks/site.yml
