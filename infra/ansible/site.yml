@@ -1,0 +1,104 @@
+---
+- name: Configure Spare Parts Hub app server
+  hosts: app
+  become: yes
+  vars:
+    app_dir: /opt/spare-parts-hub
+    repo_url: "https://github.com/your-org/Spare-Parts-Hub-App.git"
+    nodejs_package: "nodejs"
+  tasks:
+    - name: Update packages
+      yum:
+        name: "*"
+        state: latest
+
+    - name: Install base packages
+      yum:
+        name:
+          - git
+          - nginx
+          - {{ nodejs_package }}
+          - npm
+        state: present
+
+    - name: Enable and start nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Create app directory
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: "0755"
+
+    - name: Checkout application code
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_dir }}"
+        version: main
+        force: yes
+        accept_hostkey: yes
+
+    - name: Install Node dependencies
+      args:
+        chdir: "{{ app_dir }}/server"
+      npm:
+        path: "{{ app_dir }}/server"
+        production: yes
+
+    - name: Create systemd service for app
+      copy:
+        dest: /etc/systemd/system/spare-parts-hub.service
+        content: |
+          [Unit]
+          Description=Spare Parts Hub Node server
+          After=network.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory={{ app_dir }}/server
+          ExecStart=/usr/bin/npm start
+          Restart=always
+          RestartSec=3
+          User=ec2-user
+          Environment=NODE_ENV=production
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart app
+
+    - name: Configure nginx reverse proxy
+      copy:
+        dest: /etc/nginx/conf.d/spare-parts-hub.conf
+        content: |
+          server {
+            listen 80;
+            server_name _;
+
+            location / {
+              proxy_pass http://127.0.0.1:3000;
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection 'upgrade';
+              proxy_set_header Host $host;
+              proxy_cache_bypass $http_upgrade;
+            }
+          }
+      notify: Reload nginx
+
+  handlers:
+    - name: Restart app
+      systemd:
+        name: spare-parts-hub
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: reloaded

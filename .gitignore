@@ -1,0 +1,24 @@
+# Node / general
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+.DS_Store
+
+# Env & secrets
+.env
+.env.*
+
+# Expo / React Native
+mobile/.expo/
+mobile/.expo-shared/
+mobile/android/
+mobile/ios/
+mobile/web-build/
+
+# TypeScript
+*.tsbuildinfo
+

@@ -1,0 +1,4 @@
+aws_region    = "eu-north-1"
+instance_type = "t2.micro"
+ssh_key_name  = "sparepartshub"
+ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC+tR2tmPBz0FAlKANH6Wr1JgZYieGgH9tKvVQi+jjYriZepG3qvs3O24LpDGvyBgNStbPw/1rZvogqB8phWzu80J0ZZCtWhoWNGevN3vOLw92+mD/xq37mkQls+0mDMqcb/S7/J3cp0gNkncAPuNT3ZwklQZcFy15MeH2zyI+3Ci4G0WvkYoHkcPNjjQKBVExFLRq1u482LRHyASe2u/Qbs29ovxCZCrnxwJ+ZWFNVObM9Trflw7MVLrL8TfolW+4lZF9Xwix0EFKTVsQChkir757p2CuebAo7g9x+69yXtxhTxG4uvBIdL/SsS3E5SEUHlPzfV5yV4o8GgS9lym4DNqCkmpSQYcrAOfVuSdF6jJNiix8QLwJij4Uvgg59Qyr8q1nFVsLihTBBtJC193myn/25kxuj4Xc+m2cIQCi+ZAboNOxOLEAqyXfqpbxWabV2bhK0ZQL3gpC4aeZsnyr1s8HyB+VONJbzIGFpxsVHBL4cOEaQUeAIkpa3ffc7Ubk= oni@Onisokiens-MacBook-Air.local"
