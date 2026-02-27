@@ -75,7 +75,7 @@ data "aws_ami" "ubuntu_2204" {
 
 
 resource "aws_instance" "app" {
-  ami                         = data.aws_ami.ubuntu_2404.id
+  ami                         = data.aws_ami.ubuntu_2204.id
   instance_type               = var.instance_type            # free-tier: t2.micro or t3.micro
   subnet_id                   = element(data.aws_subnets.default.ids, 0)
   key_name                    = aws_key_pair.deploy.key_name
