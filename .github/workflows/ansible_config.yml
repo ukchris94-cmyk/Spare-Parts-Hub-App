@@ -40,6 +40,8 @@ jobs:
         shell: bash
 
       - name: Run Ansible playbook
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
         run: |
           INSTANCE_IP="${{ github.event.inputs.instance_ip }}"
 

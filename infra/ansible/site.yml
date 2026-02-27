@@ -4,7 +4,7 @@
   become: yes
   vars:
     app_dir: /opt/spare-parts-hub
-    repo_url: "https://github.com/your-org/Spare-Parts-Hub-App.git"
+    repo_url: "https://github.com/ukchris94-cmyk/Spare-Parts-Hub-App.git"
     nodejs_package: "nodejs"
   tasks:
     - name: Update packages
