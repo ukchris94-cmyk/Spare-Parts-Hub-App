@@ -1,6 +1,6 @@
 ---
 - name: Configure Spare Parts Hub app server
-  hosts: app
+  hosts: all
   become: yes
   vars:
     app_dir: /opt/spare-parts-hub
