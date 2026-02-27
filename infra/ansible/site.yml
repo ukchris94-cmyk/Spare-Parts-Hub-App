@@ -19,7 +19,6 @@
           - gnupg
           - git
           - nginx
-          - npm
         state: present
 
     - name: Add NodeSource GPG key
@@ -70,10 +69,9 @@
         accept_hostkey: yes
 
     - name: Install Node dependencies
-      args:
-        chdir: "{{ app_dir }}/server"
-      npm:
+      ansible.builtin.npm:
         path: "{{ app_dir }}/server"
+        ci: yes
         production: yes
 
     - name: Create systemd service for app
