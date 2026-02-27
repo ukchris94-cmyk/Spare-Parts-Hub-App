@@ -13,7 +13,9 @@ provider "aws" {
 }
 
 # Use default VPC and a default subnet (simplifies free-tier setup)
-data "aws_default_vpc" "default" {}
+data "aws_default_vpc" "default" { 
+  default=true 
+}
 
 data "aws_subnet_ids" "default" {
   vpc_id = data.aws_default_vpc.default.id
@@ -52,18 +54,25 @@ resource "aws_security_group" "web_sg" {
   }
 }
 
-data "aws_ami" "amazon_linux_2" {
+# Ubuntu 24.04 LTS AMI (x86_64)
+data "aws_ami" "ubuntu_2404" {
   most_recent = true
-  owners      = ["amazon"]
+  owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+    values = ["ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
   }
 }
 
+
 resource "aws_instance" "app" {
-  ami                         = data.aws_ami.amazon_linux_2.id
+  ami                         = data.aws_ami.ubuntu_2404.id
   instance_type               = var.instance_type            # free-tier: t2.micro or t3.micro
   subnet_id                   = element(data.aws_subnet_ids.default.ids, 0)
   key_name                    = aws_key_pair.deploy.key_name

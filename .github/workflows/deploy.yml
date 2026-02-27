@@ -70,7 +70,7 @@ jobs:
           INSTANCE_IP: ${{ needs.terraform.outputs.instance_ip }}
         run: |
           echo "[app]" > infra/ansible/inventory.dynamic
-          echo "$INSTANCE_IP ansible_user=ec2-user ansible_ssh_private_key_file=~/.ssh/aws_deploy_key" >> infra/ansible/inventory.dynamic
+          echo "$INSTANCE_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/aws_deploy_key" >> infra/ansible/inventory.dynamic
 
           ansible-playbook \
             -i infra/ansible/inventory.dynamic \
