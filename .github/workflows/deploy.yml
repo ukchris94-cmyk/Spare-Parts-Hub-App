@@ -1,8 +1,9 @@
 name: Deploy to AWS
 
 on:
-  push:
-    branches: [ main ]
+  # push:
+  #   branches: [ main ]
+  workflow_dispatch:
 
 env:
   AWS_REGION: us-east-1
@@ -74,4 +75,4 @@ jobs:
 
           ansible-playbook \
             -i infra/ansible/inventory.dynamic \
-            infra/ansible/site.yml
+            infra/ansible/playbooks/site.yml
