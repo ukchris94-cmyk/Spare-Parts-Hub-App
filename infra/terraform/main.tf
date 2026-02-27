@@ -57,14 +57,14 @@ resource "aws_security_group" "web_sg" {
   }
 }
 
-# Ubuntu 24.04 LTS AMI (x86_64)
-data "aws_ami" "ubuntu_2404" {
+# Ubuntu 22.04 LTS AMI (x86_64) – available in more regions
+data "aws_ami" "ubuntu_2204" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server-*"]
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
 
   filter {
