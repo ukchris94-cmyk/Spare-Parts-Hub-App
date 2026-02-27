@@ -13,12 +13,15 @@ provider "aws" {
 }
 
 # Use default VPC and a default subnet (simplifies free-tier setup)
-data "aws_default_vpc" "default" { 
-  default=true 
+data "aws_vpc" "default" {
+  default = true
 }
 
-data "aws_subnet_ids" "default" {
-  vpc_id = data.aws_default_vpc.default.id
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
 }
 
 # SSH key for GitHub Actions to connect via Ansible
@@ -30,7 +33,7 @@ resource "aws_key_pair" "deploy" {
 resource "aws_security_group" "web_sg" {
   name        = "spare-parts-web-sg"
   description = "Allow HTTP/SSH"
-  vpc_id      = data.aws_default_vpc.default.id
+  vpc_id      = data.aws_vpc.default.id
 
   ingress {
     from_port   = 22
@@ -74,7 +77,7 @@ data "aws_ami" "ubuntu_2404" {
 resource "aws_instance" "app" {
   ami                         = data.aws_ami.ubuntu_2404.id
   instance_type               = var.instance_type            # free-tier: t2.micro or t3.micro
-  subnet_id                   = element(data.aws_subnet_ids.default.ids, 0)
+  subnet_id                   = element(data.aws_subnets.default.ids, 0)
   key_name                    = aws_key_pair.deploy.key_name
   vpc_security_group_ids      = [aws_security_group.web_sg.id]
   associate_public_ip_address = true
