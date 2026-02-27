@@ -7,10 +7,14 @@
     repo_url: "https://github.com/ukchris94-cmyk/Spare-Parts-Hub-App.git"
     nodejs_package: "nodejs"
   tasks:
-    - name: Update packages
-      yum:
-        name: "*"
-        state: latest
+    # - name: Update packages
+    #   yum:
+    #     name: "*"
+    #     state: latest
+    - name: Update and upgrade packages
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: dist
 
     - name: Install base packages
       yum:
