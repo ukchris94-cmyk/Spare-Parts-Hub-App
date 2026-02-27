@@ -39,9 +39,9 @@ jobs:
       - name: Run Ansible playbook
         run: |
           INSTANCE_IP=$(cat /tmp/instance_ip)
-          echo "[app]" > infra/ansible/inventory.dynamic
-          echo "$INSTANCE_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/aws_deploy_key" >> infra/ansible/inventory.dynamic
-
+          
           ansible-playbook \
-            -i infra/ansible/inventory.dynamic \
+            -i "$INSTANCE_IP," \
+            -u ubuntu \
+            --private-key ~/.ssh/aws_deploy_key \
             infra/ansible/site.yml
