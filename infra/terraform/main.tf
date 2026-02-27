@@ -26,12 +26,12 @@ data "aws_subnets" "default" {
 
 # SSH key for GitHub Actions to connect via Ansible
 resource "aws_key_pair" "deploy" {
-  key_name   = var.ssh_key_name
-  public_key = var.ssh_public_key
+  key_name_prefix = "${var.ssh_key_name}-"
+  public_key      = var.ssh_public_key
 }
 
 resource "aws_security_group" "web_sg" {
-  name        = "spare-parts-web-sg"
+  name_prefix = "spare-parts-web-sg-"
   description = "Allow HTTP/SSH"
   vpc_id      = data.aws_vpc.default.id
 
