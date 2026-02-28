@@ -1,23 +1,8 @@
 import { Request, Response, Router } from "express";
 import nodemailer from "nodemailer";
-const dotenv = require('dotenv');
-dotenv.config();
+import { query } from "../db";
+
 const router = Router();
-
-// Very simple in-memory storage for demo purposes only.
-// In a real app you would persist this in your database with an expiry time.
-const verificationCodes = new Map<string, string>();
-
-type UserRecord = {
-  id: string;
-  email: string;
-  role: string;
-  verified: boolean;
-  createdAt: string;
-};
-
-// Simple in-memory "users" table keyed by normalized email.
-const users = new Map<string, UserRecord>();
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -30,10 +15,16 @@ const transporter = nodemailer.createTransport({
 const fromEmail =
   process.env.SMTP_FROM || process.env.SMTP_USER || "no-reply@example.com";
 
-router.post("/signup", async (req, res) => {
+function genId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+router.post("/signup", async (req: Request, res: Response) => {
+  const log = req.log;
   const { role, email } = req.body as { role?: string; email?: string };
 
   if (!email || !role) {
+    log.warn({ email: !!email, role: !!role }, "Signup missing fields");
     return res.status(400).json({
       ok: false,
       message: "Missing required fields: email or role",
@@ -41,66 +32,66 @@ router.post("/signup", async (req, res) => {
   }
 
   const normalizedEmail = email.toLowerCase().trim();
-
-  // Basic payload validation
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-    return res.status(400).json({
-      ok: false,
-      message: "Invalid email format",
-    });
+    log.warn({ email: normalizedEmail }, "Signup invalid email format");
+    return res.status(400).json({ ok: false, message: "Invalid email format" });
   }
 
   const normalizedRole = String(role).toLowerCase().trim();
   if (!normalizedRole) {
-    return res.status(400).json({
-      ok: false,
-      message: "Invalid role",
-    });
+    return res.status(400).json({ ok: false, message: "Invalid role" });
   }
-
-  // "Create" user record in our in-memory store if it does not already exist.
-  if (!users.has(normalizedEmail)) {
-    const user: UserRecord = {
-      id: `usr_${Date.now().toString(36)}${Math.random()
-        .toString(36)
-        .slice(2, 8)}`,
-      email: normalizedEmail,
-      role: normalizedRole,
-      verified: false,
-      createdAt: new Date().toISOString(),
-    };
-    users.set(normalizedEmail, user);
-  }
-
-  // Generate a 6-digit numeric code and store it in memory.
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  verificationCodes.set(email.toLowerCase(), code);
 
   try {
+    const existing = await query<{ id: string }>(
+      "SELECT id FROM users WHERE LOWER(email) = $1",
+      [normalizedEmail]
+    );
+    if (existing.rows.length === 0) {
+      const userId = genId("usr");
+      await query(
+        "INSERT INTO users (id, email, role, verified) VALUES ($1, $2, $3, FALSE)",
+        [userId, normalizedEmail, normalizedRole]
+      );
+      log.info({ userId, email: normalizedEmail, role: normalizedRole }, "User created");
+    }
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await query(
+      `INSERT INTO verification_codes (email, code, expires_at) VALUES ($1, $2, $3)
+       ON CONFLICT (email) DO UPDATE SET code = $2, expires_at = $3`,
+      [normalizedEmail, code, expiresAt]
+    );
+
     await transporter.sendMail({
       from: fromEmail,
       to: email,
       subject: "Your SpareParts Hub verification code",
       text: `Your verification code is ${code}. It expires in 10 minutes.`,
     });
+    log.info({ email: normalizedEmail }, "Verification email sent");
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error("Failed to send signup verification email", err);
-    return res.status(500).json({
-      ok: false,
-      message: "Could not send verification email",
-    });
+    log.error({ err, email: normalizedEmail }, "Signup failed");
+    if (String(err).includes("nodemailer") || String(err).includes("sendMail")) {
+      return res.status(500).json({
+        ok: false,
+        message: "Could not send verification email",
+      });
+    }
+    throw err;
   }
 
   return res.status(201).json({
     ok: true,
     message: "Sign up success (placeholder). Verification code generated.",
-    role,
-    email,
+    role: normalizedRole,
+    email: normalizedEmail,
   });
 });
 
-router.post("/resend-code", async (req, res) => {
+router.post("/resend-code", async (req: Request, res: Response) => {
+  const log = req.log;
   const { email } = req.body as { email?: string };
 
   if (!email) {
@@ -109,18 +100,23 @@ router.post("/resend-code", async (req, res) => {
 
   const normalized = email.toLowerCase();
   const code = Math.floor(100000 + Math.random() * 900000).toString();
-  verificationCodes.set(normalized, code);
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
   try {
+    await query(
+      `INSERT INTO verification_codes (email, code, expires_at) VALUES ($1, $2, $3)
+       ON CONFLICT (email) DO UPDATE SET code = $2, expires_at = $3`,
+      [normalized, code, expiresAt]
+    );
     await transporter.sendMail({
       from: fromEmail,
       to: email,
       subject: "Your SpareParts Hub verification code",
       text: `Your new verification code is ${code}. It expires in 10 minutes.`,
     });
+    log.info({ email: normalized }, "Verification code resent");
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error("Failed to resend verification email", err);
+    log.error({ err, email: normalized }, "Resend verification email failed");
     return res.status(500).json({
       ok: false,
       message: "Could not resend verification email",
@@ -133,7 +129,8 @@ router.post("/resend-code", async (req, res) => {
   });
 });
 
-router.post("/login", (req, res) => {
+router.post("/login", async (req: Request, res: Response) => {
+  const log = req.log;
   const { email } = req.body as { email?: string };
 
   if (!email) {
@@ -141,18 +138,22 @@ router.post("/login", (req, res) => {
   }
 
   const normalizedEmail = email.toLowerCase().trim();
-  const user = users.get(normalizedEmail);
+  const { rows } = await query<{ id: string; email: string; role: string }>(
+    "SELECT id, email, role FROM users WHERE LOWER(email) = $1",
+    [normalizedEmail]
+  );
+  const user = rows[0];
 
   if (!user) {
+    log.warn({ email: normalizedEmail }, "Login failed: user not found");
     return res
       .status(401)
       .json({ ok: false, message: "Invalid login credentials" });
   }
 
-  const tokenPayload = `${user.id}:${Date.now().toString(36)}:${Math.random()
-    .toString(36)
-    .slice(2)}`;
+  const tokenPayload = `${user.id}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
   const token = Buffer.from(tokenPayload).toString("base64url");
+  log.info({ userId: user.id, email: user.email }, "Login success");
 
   return res.json({
     ok: true,
@@ -163,8 +164,9 @@ router.post("/login", (req, res) => {
   });
 });
 
-function handleVerifyEmail(req: Request, res: Response) {
-  const { email, code } = req.body;
+async function handleVerifyEmail(req: Request, res: Response) {
+  const log = req.log;
+  const { email, code } = req.body as { email?: string; code?: string };
 
   if (!email || !code) {
     return res
@@ -173,29 +175,30 @@ function handleVerifyEmail(req: Request, res: Response) {
   }
 
   const normalized = email.toLowerCase();
-  const expected = verificationCodes.get(normalized);
+  const { rows: codeRows } = await query<{ code: string }>(
+    "SELECT code FROM verification_codes WHERE email = $1 AND expires_at > NOW()",
+    [normalized]
+  );
+  const expected = codeRows[0]?.code;
 
   if (!expected || expected !== code) {
+    log.warn({ email: normalized }, "Verify failed: invalid or expired code");
     return res
       .status(400)
       .json({ ok: false, message: "Invalid or expired verification code" });
   }
 
-  verificationCodes.delete(normalized);
+  await query("DELETE FROM verification_codes WHERE email = $1", [normalized]);
+  await query("UPDATE users SET verified = TRUE WHERE LOWER(email) = $1", [normalized]);
+  log.info({ email: normalized }, "Email verified");
 
-  const user = users.get(normalized);
-  if (user && !user.verified) {
-    user.verified = true;
-    users.set(normalized, user);
-  }
   return res.json({
     ok: true,
     message: "Email verified successfully (placeholder).",
-    email,
+    email: normalized,
   });
 }
 
-// App calls POST /api/auth/verify; keep /verify-email for backwards compatibility
 router.post("/verify", handleVerifyEmail);
 router.post("/verify-email", handleVerifyEmail);
 

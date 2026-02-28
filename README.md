@@ -44,7 +44,7 @@ Key points:
 
 - Express app in TypeScript, easy to extend.
 - Basic routing split by domain: auth, users, parts, orders.
-- Room to plug in a real database (PostgreSQL, MongoDB, etc.).
+- PostgreSQL for users, verification codes, orders, and parts; pino for structured logging.
 
 Important files:
 
@@ -79,6 +79,15 @@ npm run dev
 ```
 
 This starts the Express API (default: `http://localhost:4000`).
+
+**Database and logging:** The API uses **PostgreSQL** for users, verification codes, orders, and parts. Set `DATABASE_URL` in `server/.env` (see `server/.env.example`). Then run the schema once:
+
+```bash
+cd server
+npm run migrate
+```
+
+All HTTP requests and key events (signup, login, verify, errors) are logged with **pino**. In production with PM2 you’ll see JSON lines in `~/.pm2/logs/`; use `pm2 logs` to tail them.
 
 ### 3. Run the mobile app
 
@@ -125,7 +134,7 @@ This starts the Expo dev server; you can use:
 
 Recommended next steps:
 
-- Hook the backend routes to a real database (e.g., PostgreSQL + Prisma).
+- The backend uses PostgreSQL (see `server/src/db/schema.sql` and `npm run migrate`). You can add an ORM (e.g. Prisma) later if you prefer.
 - Replace mock data in mobile screens with live API calls using `axios` or `fetch`.
 - Flesh out the 40+ UI screens following the existing theme and navigation patterns.
 - Add proper authentication (JWT, refresh tokens) and validation.
