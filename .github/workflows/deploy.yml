@@ -75,4 +75,4 @@ jobs:
 
           ansible-playbook \
             -i infra/ansible/inventory.dynamic \
-            infra/ansible/playbooks/site.yml
+            infra/ansible/site.yml

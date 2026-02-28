@@ -20,7 +20,7 @@
           - npm
         state: absent
         purge: yes 
-        
+
     - name: Update and upgrade packages
       ansible.builtin.apt:
         update_cache: yes
@@ -83,32 +83,28 @@
         force: yes
         accept_hostkey: yes
 
-    - name: Install Node dependencies
+    - name: Install Node dependencies (include devDependencies for build)
       ansible.builtin.npm:
         path: "{{ app_dir }}/server"
         ci: yes
-        production: yes
 
-    - name: Create systemd service for app
-      copy:
-        dest: /etc/systemd/system/spare-parts-hub.service
-        content: |
-          [Unit]
-          Description=Spare Parts Hub Node server
-          After=network.target
+    - name: Build server (TypeScript)
+      ansible.builtin.command: npm run build
+      args:
+        chdir: "{{ app_dir }}/server"
 
-          [Service]
-          Type=simple
-          WorkingDirectory={{ app_dir }}/server
-          ExecStart=/usr/bin/npm start
-          Restart=always
-          RestartSec=3
-          User=ubuntu
-          Environment=NODE_ENV=production
+    - name: Install PM2 globally
+      npm:
+        name: pm2
+        global: yes
 
-          [Install]
-          WantedBy=multi-user.target
-      notify: Restart app
+    - name: Start app with PM2
+      args:
+        chdir: "{{ app_dir }}/server"
+      command: pm2 start npm --name spare-parts-hub -- start
+
+    - name: Save PM2 process list
+      command: pm2 save
 
     - name: Configure nginx reverse proxy
       copy:
@@ -130,13 +126,6 @@
       notify: Reload nginx
 
   handlers:
-    - name: Restart app
-      systemd:
-        name: spare-parts-hub
-        state: restarted
-        enabled: yes
-        daemon_reload: yes
-
     - name: Reload nginx
       service:
         name: nginx

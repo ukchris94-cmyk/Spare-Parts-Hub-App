@@ -1,0 +1,52 @@
+name: CI/CD Deploy (PM2)
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  APP_DIR: /opt/spare-parts-hub
+  SERVER_USER: ubuntu
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AWS_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2
+        run: |
+          ssh $SERVER_USER@${{ secrets.SERVER_IP }} << 'EOF'
+            set -e
+
+            cd $APP_DIR
+
+            echo "Fetching latest code..."
+            git fetch origin
+            git reset --hard origin/main
+
+            echo "Installing dependencies..."
+            cd server
+            npm ci
+
+            echo "Building backend..."
+            npm run build
+
+            echo "Restarting PM2 process..."
+            pm2 restart spare-parts-hub
+
+            echo "Saving PM2 state..."
+            pm2 save
+
+            echo "Deployment complete."
+          EOF

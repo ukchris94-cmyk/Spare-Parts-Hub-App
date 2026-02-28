@@ -1,6 +1,7 @@
-import { Router } from "express";
+import { Request, Response, Router } from "express";
 import nodemailer from "nodemailer";
-
+const dotenv = require('dotenv');
+dotenv.config();
 const router = Router();
 
 // Very simple in-memory storage for demo purposes only.
@@ -162,8 +163,8 @@ router.post("/login", (req, res) => {
   });
 });
 
-router.post("/verify-email", (req, res) => {
-  const { email, code } = req.body as { email?: string; code?: string };
+function handleVerifyEmail(req: Request, res: Response) {
+  const { email, code } = req.body;
 
   if (!email || !code) {
     return res
@@ -192,6 +193,10 @@ router.post("/verify-email", (req, res) => {
     message: "Email verified successfully (placeholder).",
     email,
   });
-});
+}
+
+// App calls POST /api/auth/verify; keep /verify-email for backwards compatibility
+router.post("/verify", handleVerifyEmail);
+router.post("/verify-email", handleVerifyEmail);
 
 export default router;
