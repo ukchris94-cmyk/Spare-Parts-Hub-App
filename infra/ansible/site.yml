@@ -6,6 +6,21 @@
     app_dir: /opt/spare-parts-hub
     repo_url: "https://github.com/ukchris94-cmyk/Spare-Parts-Hub-App.git"
   tasks:
+    - name: Fix broken dpkg state
+      ansible.builtin.shell: |
+          dpkg --configure -a || true
+          apt-get -f install -y || true
+      changed_when: false  
+
+    - name: Remove conflicting Ubuntu node packages
+      ansible.builtin.apt:
+        name:
+          - libnode-dev
+          - nodejs-doc
+          - npm
+        state: absent
+        purge: yes 
+        
     - name: Update and upgrade packages
       ansible.builtin.apt:
         update_cache: yes
