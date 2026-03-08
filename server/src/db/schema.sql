@@ -11,6 +11,22 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (LOWER(email));
 
+-- Vehicles saved in "My Garage"
+CREATE TABLE IF NOT EXISTS vehicles (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  year       INTEGER,
+  make       TEXT,
+  model      TEXT,
+  trim       TEXT,
+  engine     TEXT,
+  vin        TEXT,
+  is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vehicles_user ON vehicles (user_id, is_primary);
+
 CREATE TABLE IF NOT EXISTS verification_codes (
   email     TEXT NOT NULL PRIMARY KEY,
   code      TEXT NOT NULL,

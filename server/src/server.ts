@@ -7,6 +7,7 @@ import { pool } from "./db";
 import authRouter from "./routes/auth";
 import partsRouter from "./routes/parts";
 import ordersRouter from "./routes/orders";
+import usersRouter from "./routes/users";
 
 dotenv.config();
 
@@ -39,9 +40,12 @@ app.get("/health", async (_req, res) => {
   }
 });
 
+// Support both `/api/auth/*` (older clients) and `/auth/*` (new mobile app)
+app.use("/auth", authRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/parts", partsRouter);
 app.use("/api/orders", ordersRouter);
+app.use("/api/users", usersRouter);
 
 const PORT = process.env.PORT || 4000;
 
