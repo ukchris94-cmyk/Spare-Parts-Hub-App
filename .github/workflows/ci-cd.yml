@@ -52,7 +52,7 @@ jobs:
         run: |
           ssh $SERVER_USER@${{ secrets.SERVER_IP }} << EOF
             cd $APP_DIR/server
-            npm ci --omit=dev
+            npm ci 
           EOF
 
       # ---------- RESTART PM2 ----------
