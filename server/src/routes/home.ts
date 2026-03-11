@@ -26,6 +26,15 @@ type PartRow = {
   description: string | null;
 };
 
+function isDbColumnError(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code?: string }).code === "42703"
+  );
+}
+
 function makeVehicleTitle(vehicle: VehicleRow): string {
   const year = vehicle.year ? String(vehicle.year) : "";
   const make = vehicle.make ?? "";
@@ -54,39 +63,77 @@ router.get("/user", async (req: Request, res: Response) => {
       );
       user = userResult.rows[0];
     } else {
-      const userResult = await query<UserRow>(
-        "SELECT id, email, role FROM users WHERE role = 'user' ORDER BY created_at DESC LIMIT 1"
-      );
-      user = userResult.rows[0];
+      try {
+        const userResult = await query<UserRow>(
+          "SELECT id, email, role FROM users ORDER BY created_at DESC LIMIT 1"
+        );
+        user = userResult.rows[0];
+      } catch (err) {
+        if (!isDbColumnError(err)) throw err;
+        log.warn({ err }, "Falling back to users ORDER BY id (created_at missing)");
+        const userResult = await query<UserRow>(
+          "SELECT id, email, role FROM users ORDER BY id DESC LIMIT 1"
+        );
+        user = userResult.rows[0];
+      }
     }
 
     if (!user) {
       return res.status(404).json({ ok: false, message: "User not found" });
     }
 
-    const vehiclesResult = await query<VehicleRow>(
-      `SELECT id, year, make, model, trim, engine, is_primary, created_at
-       FROM vehicles
-       WHERE user_id = $1
-       ORDER BY is_primary DESC, created_at DESC`,
-      [user.id]
-    );
+    let vehiclesRows: VehicleRow[] = [];
+    try {
+      const vehiclesResult = await query<VehicleRow>(
+        `SELECT id, year, make, model, trim, engine, is_primary, created_at
+         FROM vehicles
+         WHERE user_id = $1
+         ORDER BY is_primary DESC, created_at DESC`,
+        [user.id]
+      );
+      vehiclesRows = vehiclesResult.rows;
+    } catch (err) {
+      if (!isDbColumnError(err)) throw err;
+      log.warn({ err, userId: user.id }, "Falling back to legacy vehicles query");
+      const vehiclesResult = await query<VehicleRow>(
+        `SELECT id, year, make, model, NULL::text AS trim, NULL::text AS engine, is_primary, NOW()::text AS created_at
+         FROM vehicles
+         WHERE user_id = $1
+         ORDER BY is_primary DESC, id DESC`,
+        [user.id]
+      );
+      vehiclesRows = vehiclesResult.rows;
+    }
 
-    const partsResult = await query<PartRow>(
-      `SELECT id, name, description
-       FROM parts
-       ORDER BY created_at DESC
-       LIMIT 8`
-    );
+    let partsRows: PartRow[] = [];
+    try {
+      const partsResult = await query<PartRow>(
+        `SELECT id, name, description
+         FROM parts
+         ORDER BY created_at DESC
+         LIMIT 8`
+      );
+      partsRows = partsResult.rows;
+    } catch (err) {
+      if (!isDbColumnError(err)) throw err;
+      log.warn({ err }, "Falling back to legacy parts query");
+      const partsResult = await query<PartRow>(
+        `SELECT id, name, description
+         FROM parts
+         ORDER BY id DESC
+         LIMIT 8`
+      );
+      partsRows = partsResult.rows;
+    }
 
-    const vehicles = vehiclesResult.rows.map((vehicle) => ({
+    const vehicles = vehiclesRows.map((vehicle) => ({
       id: vehicle.id,
       title: makeVehicleTitle(vehicle),
       subtitle: makeVehicleSubtitle(vehicle),
       isPrimary: vehicle.is_primary,
     }));
 
-    const trendingParts = partsResult.rows.map((part) => ({
+    const trendingParts = partsRows.map((part) => ({
       id: part.id,
       name: part.name,
       subtitle: part.description ?? "Top rated part",

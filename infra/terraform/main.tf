@@ -8,6 +8,7 @@ terraform {
   }
 }
 
+# AWS provider
 provider "aws" {
   region = var.aws_region
 }
@@ -17,6 +18,7 @@ data "aws_vpc" "default" {
   default = true
 }
 
+# Get default subnet
 data "aws_subnets" "default" {
   filter {
     name   = "vpc-id"
@@ -77,7 +79,7 @@ data "aws_ami" "ubuntu_2204" {
 resource "aws_instance" "app" {
   ami                         = data.aws_ami.ubuntu_2204.id
   instance_type               = var.instance_type            # free-tier: t2.micro or t3.micro
-  subnet_id                   = element(data.aws_subnets.default.ids, 0)
+  subnet_id                   = element(data.aws_subnets.default.ids, 0) # Get first subnet ID
   key_name                    = aws_key_pair.deploy.key_name
   vpc_security_group_ids      = [aws_security_group.web_sg.id]
   associate_public_ip_address = true
