@@ -49,6 +49,50 @@ function makeVehicleSubtitle(vehicle: VehicleRow): string {
   return "Vehicle details unavailable";
 }
 
+function fallbackHomePayload() {
+  return {
+    userName: "Alex",
+    subtitle: "Browse genuine parts, track your orders and manage your vehicles.",
+    vehicles: [
+      {
+        id: "vehicle-fallback-1",
+        title: "2022 Toyota Corolla",
+        subtitle: "1.8L Hybrid",
+        isPrimary: true,
+      },
+    ],
+    trendingParts: [
+      {
+        id: "part-fallback-1",
+        name: "Premium Synthetic Oil 0W-20",
+        subtitle: "Top rated part",
+        query: "Premium Synthetic Oil 0W-20",
+      },
+      {
+        id: "part-fallback-2",
+        name: "Ceramic Brake Pads (Front)",
+        subtitle: "Top rated part",
+        query: "Ceramic Brake Pads",
+      },
+    ],
+    promo: {
+      title: "Rainy Season Special",
+      body: "Stay safe on flooded roads and slippery highways. Up to 25% off on brake pads, wipers, headlights & tires.",
+      cta: "Shop now",
+    },
+    categories: [
+      "Engine",
+      "Brakes",
+      "Lighting",
+      "Batteries",
+      "Tires",
+      "Fluids",
+      "Filters",
+      "All",
+    ],
+  };
+}
+
 // Compatibility endpoint for mobile clients currently calling `/home/user`.
 router.get("/user", async (req: Request, res: Response) => {
   const log = req.log;
@@ -163,10 +207,11 @@ router.get("/user", async (req: Request, res: Response) => {
       ],
     });
   } catch (err) {
-    log.error({ err, userId }, "Home data query failed");
-    return res
-      .status(500)
-      .json({ ok: false, message: "Could not load home data" });
+    log.warn({ err, userId }, "Home data query failed, serving fallback payload");
+    return res.json({
+      ...fallbackHomePayload(),
+      degraded: true,
+    });
   }
 });
 
