@@ -1,7 +1,11 @@
 import { Router, Request, Response } from "express";
-import { query } from "../db";
+import { query, withClient } from "../db";
 
 const router = Router();
+
+function genId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
 
 type UserRow = {
   id: string;
@@ -91,6 +95,29 @@ function fallbackHomePayload() {
       "All",
     ],
   };
+}
+
+async function resolveUserId(requestedUserId?: string): Promise<string | null> {
+  if (requestedUserId) {
+    const userResult = await query<UserRow>(
+      "SELECT id, email, role FROM users WHERE id = $1",
+      [requestedUserId]
+    );
+    return userResult.rows[0]?.id ?? null;
+  }
+
+  try {
+    const userResult = await query<UserRow>(
+      "SELECT id, email, role FROM users ORDER BY created_at DESC LIMIT 1"
+    );
+    return userResult.rows[0]?.id ?? null;
+  } catch (err) {
+    if (!isDbColumnError(err)) throw err;
+    const userResult = await query<UserRow>(
+      "SELECT id, email, role FROM users ORDER BY id DESC LIMIT 1"
+    );
+    return userResult.rows[0]?.id ?? null;
+  }
 }
 
 // Compatibility endpoint for mobile clients currently calling `/home/user`.
@@ -212,6 +239,90 @@ router.get("/user", async (req: Request, res: Response) => {
       ...fallbackHomePayload(),
       degraded: true,
     });
+  }
+});
+
+// Compatibility endpoint for mobile AddVehicle screen.
+router.post("/user/vehicles", async (req: Request, res: Response) => {
+  const log = req.log;
+  const body = req.body as {
+    userId?: string;
+    year?: number | string;
+    make?: string;
+    model?: string;
+    trim?: string;
+    vin?: string;
+    isPrimary?: boolean;
+  };
+
+  const requestedUserId =
+    typeof body.userId === "string" ? body.userId.trim() : "";
+  const make = typeof body.make === "string" ? body.make.trim() : "";
+  const model = typeof body.model === "string" ? body.model.trim() : "";
+  const trim = typeof body.trim === "string" ? body.trim.trim() : "";
+  const vin = typeof body.vin === "string" ? body.vin.trim() : "";
+  const isPrimary = Boolean(body.isPrimary);
+
+  let year: number | null = null;
+  if (typeof body.year === "number" && Number.isFinite(body.year)) {
+    year = body.year;
+  } else if (typeof body.year === "string" && body.year.trim()) {
+    const parsedYear = Number.parseInt(body.year.trim(), 10);
+    year = Number.isFinite(parsedYear) ? parsedYear : null;
+  }
+
+  if (!make || !model) {
+    return res
+      .status(400)
+      .json({ ok: false, message: "make and model are required" });
+  }
+
+  try {
+    const userId = await resolveUserId(requestedUserId);
+    if (!userId) {
+      return res.status(404).json({ ok: false, message: "User not found" });
+    }
+
+    const vehicleId = genId("veh");
+
+    await withClient(async (client) => {
+      await client.query("BEGIN");
+
+      if (isPrimary) {
+        await client.query(
+          "UPDATE vehicles SET is_primary = FALSE WHERE user_id = $1",
+          [userId]
+        );
+      }
+
+      await client.query(
+        `INSERT INTO vehicles
+          (id, user_id, year, make, model, trim, vin, is_primary)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [vehicleId, userId, year, make, model, trim || null, vin || null, isPrimary]
+      );
+
+      await client.query("COMMIT");
+    });
+
+    return res.status(201).json({
+      ok: true,
+      vehicle: {
+        id: vehicleId,
+        userId,
+        year,
+        make,
+        model,
+        trim: trim || null,
+        vin: vin || null,
+        isPrimary,
+      },
+    });
+  } catch (err) {
+    log.error({ err, requestedUserId }, "Create vehicle failed");
+    return res
+      .status(500)
+      .json({ ok: false, message: "Could not save vehicle" });
   }
 });
 
