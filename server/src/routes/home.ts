@@ -51,6 +51,15 @@ function isDbAuthError(err: unknown): boolean {
   );
 }
 
+function isDbErrorCode(err: unknown, code: string): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code?: string }).code === code
+  );
+}
+
 function makeVehicleTitle(vehicle: VehicleRow): string {
   const year = vehicle.year ? String(vehicle.year) : "";
   const make = vehicle.make ?? "";
@@ -299,22 +308,26 @@ router.post("/user/vehicles", async (req: Request, res: Response) => {
 
     await withClient(async (client) => {
       await client.query("BEGIN");
+      try {
+        if (isPrimary) {
+          await client.query(
+            "UPDATE vehicles SET is_primary = FALSE WHERE user_id = $1",
+            [userId]
+          );
+        }
 
-      if (isPrimary) {
         await client.query(
-          "UPDATE vehicles SET is_primary = FALSE WHERE user_id = $1",
-          [userId]
+          `INSERT INTO vehicles
+            (id, user_id, year, make, model, trim, vin, is_primary)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [vehicleId, userId, year, make, model, trim || null, vin || null, isPrimary]
         );
+
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
       }
-
-      await client.query(
-        `INSERT INTO vehicles
-          (id, user_id, year, make, model, trim, vin, is_primary)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [vehicleId, userId, year, make, model, trim || null, vin || null, isPrimary]
-      );
-
-      await client.query("COMMIT");
     });
 
     return res.status(201).json({
@@ -336,6 +349,18 @@ router.post("/user/vehicles", async (req: Request, res: Response) => {
       return res.status(503).json({
         ok: false,
         message: "Database auth failed. Check DATABASE_URL credentials.",
+      });
+    }
+    if (isDbErrorCode(err, "42P01")) {
+      return res.status(503).json({
+        ok: false,
+        message: "Database schema missing. Run migrations to create vehicles table.",
+      });
+    }
+    if (isDbErrorCode(err, "23503")) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid user reference for vehicle save.",
       });
     }
     return res
