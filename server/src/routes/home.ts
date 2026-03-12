@@ -39,6 +39,18 @@ function isDbColumnError(err: unknown): boolean {
   );
 }
 
+function isDbAuthError(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "message" in err &&
+    typeof (err as { message?: unknown }).message === "string" &&
+    (err as { message: string }).message.includes(
+      "SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string"
+    )
+  );
+}
+
 function makeVehicleTitle(vehicle: VehicleRow): string {
   const year = vehicle.year ? String(vehicle.year) : "";
   const make = vehicle.make ?? "";
@@ -320,6 +332,12 @@ router.post("/user/vehicles", async (req: Request, res: Response) => {
     });
   } catch (err) {
     log.error({ err, requestedUserId }, "Create vehicle failed");
+    if (isDbAuthError(err)) {
+      return res.status(503).json({
+        ok: false,
+        message: "Database auth failed. Check DATABASE_URL credentials.",
+      });
+    }
     return res
       .status(500)
       .json({ ok: false, message: "Could not save vehicle" });
