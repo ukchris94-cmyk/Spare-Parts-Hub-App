@@ -17,6 +17,7 @@ type VehicleRow = {
   id: string;
   user_id: string;
   year: number | null;
+  mileage: number | null;
   make: string | null;
   model: string | null;
   trim: string | null;
@@ -41,6 +42,15 @@ type PartRow = {
   role: string | null;
 };
 
+function buildKnownIssuePartNames(make?: string | null, model?: string | null): string[] {
+  const key = `${make ?? ""} ${model ?? ""}`.toLowerCase();
+  if (key.includes("toyota")) return ["Brake Pads", "Spark Plugs", "Oil Filter"];
+  if (key.includes("honda")) return ["CVT Fluid", "Brake Rotors", "Cabin Filter"];
+  if (key.includes("bmw")) return ["Ignition Coils", "Control Arm Bushings", "Oil Filter Housing Gasket"];
+  if (key.includes("nissan")) return ["Transmission Fluid", "Brake Pads", "Engine Mount"];
+  return ["Brake Pads", "Oil Filter", "Battery"];
+}
+
 // Home dashboard summary for the User role.
 router.get("/:userId/home", async (req: Request, res: Response) => {
   const { userId } = req.params;
@@ -57,7 +67,7 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
     }
 
     const { rows: vehicleRows } = await query<VehicleRow>(
-      `SELECT id, user_id, year, make, model, trim, engine, vin, is_primary, created_at
+      `SELECT id, user_id, year, mileage, make, model, trim, engine, vin, is_primary, created_at
        FROM vehicles
        WHERE user_id = $1
        ORDER BY is_primary DESC, created_at DESC`,
@@ -85,6 +95,11 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
        ORDER BY created_at DESC
        LIMIT 8`
     );
+    const knownIssuePartNames = buildKnownIssuePartNames(
+      primaryVehicle?.make,
+      primaryVehicle?.model
+    );
+    const hotNewParts = partsRows.slice(0, 4);
 
     log.debug(
       {
@@ -119,6 +134,13 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
       },
       recommendations: {
         trendingParts: partsRows,
+        quickService: {
+          knownIssueParts: knownIssuePartNames.map((name) => ({
+            name,
+            query: name,
+          })),
+          hotNewParts,
+        },
       },
     });
   } catch (err) {
@@ -131,7 +153,7 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
 router.get("/:userId/vehicles", async (req: Request, res: Response) => {
   const { userId } = req.params;
   const { rows } = await query<VehicleRow>(
-    `SELECT id, user_id, year, make, model, trim, engine, vin, is_primary, created_at
+    `SELECT id, user_id, year, mileage, make, model, trim, engine, vin, is_primary, created_at
      FROM vehicles
      WHERE user_id = $1
      ORDER BY is_primary DESC, created_at DESC`,
@@ -149,6 +171,7 @@ router.post("/:userId/vehicles", async (req: Request, res: Response) => {
   const log = req.log;
   const {
     year,
+    mileage,
     make,
     model,
     trim,
@@ -157,6 +180,7 @@ router.post("/:userId/vehicles", async (req: Request, res: Response) => {
     isPrimary,
   } = req.body as {
     year?: number;
+    mileage?: number;
     make?: string;
     model?: string;
     trim?: string;
@@ -164,6 +188,13 @@ router.post("/:userId/vehicles", async (req: Request, res: Response) => {
     vin?: string;
     isPrimary?: boolean;
   };
+
+  if (mileage === undefined || mileage === null || !Number.isFinite(mileage) || mileage < 0) {
+    return res.status(400).json({
+      ok: false,
+      message: "mileage is required and must be a valid number",
+    });
+  }
 
   if (!make || !model) {
     return res
@@ -186,12 +217,13 @@ router.post("/:userId/vehicles", async (req: Request, res: Response) => {
 
       await client.query(
         `INSERT INTO vehicles
-          (id, user_id, year, make, model, trim, engine, vin, is_primary)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, FALSE))`,
+          (id, user_id, year, mileage, make, model, trim, engine, vin, is_primary)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, FALSE))`,
         [
           id,
           userId,
           year ?? null,
+          mileage,
           make,
           model,
           trim ?? null,
@@ -211,6 +243,7 @@ router.post("/:userId/vehicles", async (req: Request, res: Response) => {
         id,
         userId,
         year: year ?? null,
+        mileage,
         make,
         model,
         trim: trim ?? null,
@@ -233,6 +266,7 @@ router.patch(
     const log = req.log;
     const {
       year,
+      mileage,
       make,
       model,
       trim,
@@ -241,6 +275,7 @@ router.patch(
       isPrimary,
     } = req.body as {
       year?: number;
+      mileage?: number;
       make?: string;
       model?: string;
       trim?: string;
@@ -260,6 +295,10 @@ router.patch(
     if (make !== undefined) {
       fields.push(`make = $${i++}`);
       params.push(make);
+    }
+    if (mileage !== undefined) {
+      fields.push(`mileage = $${i++}`);
+      params.push(mileage);
     }
     if (model !== undefined) {
       fields.push(`model = $${i++}`);
@@ -356,4 +395,3 @@ router.delete(
 );
 
 export default router;
-

@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
   id         TEXT PRIMARY KEY,
   user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   year       INTEGER,
+  mileage    INTEGER,
   make       TEXT,
   model      TEXT,
   trim       TEXT,
@@ -24,6 +25,8 @@ CREATE TABLE IF NOT EXISTS vehicles (
   is_primary BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS mileage INTEGER;
 
 CREATE INDEX IF NOT EXISTS idx_vehicles_user ON vehicles (user_id, is_primary);
 

@@ -16,6 +16,7 @@ type UserRow = {
 type VehicleRow = {
   id: string;
   year: number | null;
+  mileage: number | null;
   make: string | null;
   model: string | null;
   trim: string | null;
@@ -68,10 +69,26 @@ function makeVehicleTitle(vehicle: VehicleRow): string {
 }
 
 function makeVehicleSubtitle(vehicle: VehicleRow): string {
+  const mileageText =
+    vehicle.mileage !== null && Number.isFinite(vehicle.mileage)
+      ? `${vehicle.mileage.toLocaleString()} km`
+      : "";
   if (vehicle.trim && vehicle.engine) return `${vehicle.trim} · ${vehicle.engine}`;
+  if (vehicle.trim && mileageText) return `${vehicle.trim} · ${mileageText}`;
+  if (vehicle.engine && mileageText) return `${vehicle.engine} · ${mileageText}`;
   if (vehicle.trim) return vehicle.trim;
   if (vehicle.engine) return vehicle.engine;
+  if (mileageText) return mileageText;
   return "Vehicle details unavailable";
+}
+
+function buildKnownIssuePartNames(make?: string | null, model?: string | null): string[] {
+  const key = `${make ?? ""} ${model ?? ""}`.toLowerCase();
+  if (key.includes("toyota")) return ["Brake Pads", "Spark Plugs", "Oil Filter"];
+  if (key.includes("honda")) return ["CVT Fluid", "Brake Rotors", "Cabin Filter"];
+  if (key.includes("bmw")) return ["Ignition Coils", "Control Arm Bushings", "Oil Filter Housing Gasket"];
+  if (key.includes("nissan")) return ["Transmission Fluid", "Brake Pads", "Engine Mount"];
+  return ["Brake Pads", "Oil Filter", "Battery"];
 }
 
 function fallbackHomePayload() {
@@ -82,7 +99,7 @@ function fallbackHomePayload() {
       {
         id: "vehicle-fallback-1",
         title: "2022 Toyota Corolla",
-        subtitle: "1.8L Hybrid",
+        subtitle: "1.8L Hybrid · 85,000 km",
         isPrimary: true,
       },
     ],
@@ -177,7 +194,7 @@ router.get("/user", async (req: Request, res: Response) => {
     let vehiclesRows: VehicleRow[] = [];
     try {
       const vehiclesResult = await query<VehicleRow>(
-        `SELECT id, year, make, model, trim, engine, is_primary, created_at
+        `SELECT id, year, mileage, make, model, trim, engine, is_primary, created_at
          FROM vehicles
          WHERE user_id = $1
          ORDER BY is_primary DESC, created_at DESC`,
@@ -188,7 +205,7 @@ router.get("/user", async (req: Request, res: Response) => {
       if (!isDbColumnError(err)) throw err;
       log.warn({ err, userId: user.id }, "Falling back to legacy vehicles query");
       const vehiclesResult = await query<VehicleRow>(
-        `SELECT id, year, make, model, NULL::text AS trim, NULL::text AS engine, is_primary, NOW()::text AS created_at
+        `SELECT id, year, mileage, make, model, NULL::text AS trim, NULL::text AS engine, is_primary, NOW()::text AS created_at
          FROM vehicles
          WHERE user_id = $1
          ORDER BY is_primary DESC, id DESC`,
@@ -231,6 +248,13 @@ router.get("/user", async (req: Request, res: Response) => {
       subtitle: part.description ?? "Top rated part",
       query: part.name,
     }));
+    const primaryVehicle =
+      vehiclesRows.find((vehicle) => vehicle.is_primary) ?? vehiclesRows[0];
+    const knownIssuePartNames = buildKnownIssuePartNames(
+      primaryVehicle?.make,
+      primaryVehicle?.model
+    );
+    const hotNewParts = trendingParts.slice(0, 4);
 
     return res.json({
       userName: user.email.split("@")[0],
@@ -253,6 +277,13 @@ router.get("/user", async (req: Request, res: Response) => {
         "Filters",
         "All",
       ],
+      quickService: {
+        knownIssueParts: knownIssuePartNames.map((name) => ({
+          name,
+          query: name,
+        })),
+        hotNewParts,
+      },
     });
   } catch (err) {
     log.warn({ err, userId }, "Home data query failed, serving fallback payload");
@@ -269,6 +300,7 @@ router.post("/user/vehicles", async (req: Request, res: Response) => {
   const body = req.body as {
     userId?: string;
     year?: number | string;
+    mileage?: number | string;
     make?: string;
     model?: string;
     trim?: string;
@@ -297,6 +329,19 @@ router.post("/user/vehicles", async (req: Request, res: Response) => {
       .status(400)
       .json({ ok: false, message: "make and model are required" });
   }
+  const rawMileage =
+    typeof body.mileage === "number"
+      ? body.mileage
+      : typeof body.mileage === "string"
+      ? Number.parseInt(body.mileage.trim(), 10)
+      : NaN;
+  const mileage = Number.isFinite(rawMileage) && rawMileage >= 0 ? rawMileage : NaN;
+  if (!Number.isFinite(mileage)) {
+    return res.status(400).json({
+      ok: false,
+      message: "mileage is required and must be a valid number",
+    });
+  }
 
   try {
     const userId = await resolveUserId(requestedUserId);
@@ -318,9 +363,9 @@ router.post("/user/vehicles", async (req: Request, res: Response) => {
 
         await client.query(
           `INSERT INTO vehicles
-            (id, user_id, year, make, model, trim, vin, is_primary)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [vehicleId, userId, year, make, model, trim || null, vin || null, isPrimary]
+            (id, user_id, year, mileage, make, model, trim, vin, is_primary)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [vehicleId, userId, year, mileage, make, model, trim || null, vin || null, isPrimary]
         );
 
         await client.query("COMMIT");
@@ -336,6 +381,7 @@ router.post("/user/vehicles", async (req: Request, res: Response) => {
         id: vehicleId,
         userId,
         year,
+        mileage,
         make,
         model,
         trim: trim || null,
