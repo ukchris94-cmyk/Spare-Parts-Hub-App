@@ -1,8 +1,11 @@
 import { Request, Response, Router } from "express";
 import nodemailer from "nodemailer";
+import { randomBytes, scrypt, timingSafeEqual } from "crypto";
+import { promisify } from "util";
 import { query } from "../db";
 
 const router = Router();
+const scryptAsync = promisify(scrypt);
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -19,15 +22,40 @@ function genId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function validatePassword(password: string): string | null {
+  if (!password || password.length < 8) return "Password must be at least 8 characters";
+  if (password.length > 128) return "Password is too long";
+  return null;
+}
+
+async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16).toString("hex");
+  const key = (await scryptAsync(password, salt, 64)) as Buffer;
+  return `scrypt:${salt}:${key.toString("hex")}`;
+}
+
+async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [algorithm, salt, expectedHex] = stored.split(":");
+  if (algorithm !== "scrypt" || !salt || !expectedHex) return false;
+  const derived = (await scryptAsync(password, salt, 64)) as Buffer;
+  const expected = Buffer.from(expectedHex, "hex");
+  if (derived.length !== expected.length) return false;
+  return timingSafeEqual(derived, expected);
+}
+
 router.post("/signup", async (req: Request, res: Response) => {
   const log = req.log;
-  const { role, email } = req.body as { role?: string; email?: string };
+  const { role, email, password } = req.body as {
+    role?: string;
+    email?: string;
+    password?: string;
+  };
 
-  if (!email || !role) {
-    log.warn({ email: !!email, role: !!role }, "Signup missing fields");
+  if (!email || !role || !password) {
+    log.warn({ email: !!email, role: !!role, password: !!password }, "Signup missing fields");
     return res.status(400).json({
       ok: false,
-      message: "Missing required fields: email or role",
+      message: "Missing required fields: email, role or password",
     });
   }
 
@@ -41,20 +69,29 @@ router.post("/signup", async (req: Request, res: Response) => {
   if (!normalizedRole) {
     return res.status(400).json({ ok: false, message: "Invalid role" });
   }
+  const passwordError = validatePassword(password);
+  if (passwordError) {
+    return res.status(400).json({ ok: false, message: passwordError });
+  }
 
   try {
     const existing = await query<{ id: string }>(
-      "SELECT id FROM users WHERE LOWER(email) = $1",
+      "SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1",
       [normalizedEmail]
     );
-    if (existing.rows.length === 0) {
-      const userId = genId("usr");
-      await query(
-        "INSERT INTO users (id, email, role, verified) VALUES ($1, $2, $3, FALSE)",
-        [userId, normalizedEmail, normalizedRole]
-      );
-      log.info({ userId, email: normalizedEmail, role: normalizedRole }, "User created");
+    if (existing.rows.length > 0) {
+      return res.status(409).json({
+        ok: false,
+        message: "Account already exists. Please log in.",
+      });
     }
+    const userId = genId("usr");
+    const passwordHash = await hashPassword(password);
+    await query(
+      "INSERT INTO users (id, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, FALSE)",
+      [userId, normalizedEmail, passwordHash, normalizedRole]
+    );
+    log.info({ userId, email: normalizedEmail, role: normalizedRole }, "User created");
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
@@ -131,24 +168,45 @@ router.post("/resend-code", async (req: Request, res: Response) => {
 
 router.post("/login", async (req: Request, res: Response) => {
   const log = req.log;
-  const { email } = req.body as { email?: string };
+  const { email, password } = req.body as { email?: string; password?: string };
 
-  if (!email) {
-    return res.status(400).json({ ok: false, message: "Email is required" });
+  if (!email || !password) {
+    return res.status(400).json({ ok: false, message: "Email and password are required" });
   }
 
   const normalizedEmail = email.toLowerCase().trim();
-  const { rows } = await query<{ id: string; email: string; role: string }>(
-    "SELECT id, email, role FROM users WHERE LOWER(email) = $1",
+  const { rows } = await query<{
+    id: string;
+    email: string;
+    role: string;
+    verified: boolean;
+    password_hash: string | null;
+  }>(
+    "SELECT id, email, role, verified, password_hash FROM users WHERE LOWER(email) = $1",
     [normalizedEmail]
   );
   const user = rows[0];
 
-  if (!user) {
+  if (!user || !user.password_hash) {
     log.warn({ email: normalizedEmail }, "Login failed: user not found");
     return res
       .status(401)
       .json({ ok: false, message: "Invalid login credentials" });
+  }
+
+  const isPasswordValid = await verifyPassword(password, user.password_hash);
+  if (!isPasswordValid) {
+    log.warn({ email: normalizedEmail }, "Login failed: wrong password");
+    return res
+      .status(401)
+      .json({ ok: false, message: "Invalid login credentials" });
+  }
+
+  if (!user.verified) {
+    return res.status(403).json({
+      ok: false,
+      message: "Please verify your email before logging in",
+    });
   }
 
   const tokenPayload = `${user.id}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;

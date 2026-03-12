@@ -4,10 +4,13 @@
 CREATE TABLE IF NOT EXISTS users (
   id         TEXT PRIMARY KEY,
   email      TEXT NOT NULL UNIQUE,
+  password_hash TEXT,
   role       TEXT NOT NULL,
   verified   BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (LOWER(email));
 
