@@ -39,6 +39,13 @@ CREATE TABLE IF NOT EXISTS verification_codes (
   expires_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  email      TEXT NOT NULL PRIMARY KEY,
+  token_hash TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS orders (
   id         TEXT PRIMARY KEY,
   user_id    TEXT NOT NULL REFERENCES users(id),

@@ -1,6 +1,6 @@
 import { Request, Response, Router } from "express";
 import nodemailer from "nodemailer";
-import { randomBytes, scrypt, timingSafeEqual } from "crypto";
+import { createHash, randomBytes, scrypt, timingSafeEqual } from "crypto";
 import { promisify } from "util";
 import { query } from "../db";
 
@@ -41,6 +41,10 @@ async function verifyPassword(password: string, stored: string): Promise<boolean
   const expected = Buffer.from(expectedHex, "hex");
   if (derived.length !== expected.length) return false;
   return timingSafeEqual(derived, expected);
+}
+
+function hashResetToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 router.post("/signup", async (req: Request, res: Response) => {
@@ -221,6 +225,135 @@ router.post("/login", async (req: Request, res: Response) => {
     role: user.role,
     token,
   });
+});
+
+router.post("/forgot-password", async (req: Request, res: Response) => {
+  const log = req.log;
+  const { email } = req.body as { email?: string };
+
+  if (!email) {
+    return res.status(400).json({ ok: false, message: "Email is required" });
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+  const genericResponse = {
+    ok: true,
+    message:
+      "If an account with that email exists, a password reset token has been sent.",
+  };
+
+  try {
+    const { rows } = await query<{
+      id: string;
+      email: string;
+      verified: boolean;
+      password_hash: string | null;
+    }>(
+      "SELECT id, email, verified, password_hash FROM users WHERE LOWER(email) = $1 LIMIT 1",
+      [normalizedEmail]
+    );
+    const user = rows[0];
+
+    if (!user) {
+      log.info({ email: normalizedEmail }, "Forgot password requested for unknown email");
+      return res.json(genericResponse);
+    }
+
+    const rawToken = randomBytes(24).toString("base64url");
+    const tokenHash = hashResetToken(rawToken);
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    await query(
+      `INSERT INTO password_reset_tokens (email, token_hash, expires_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (email) DO UPDATE SET token_hash = $2, expires_at = $3, created_at = NOW()`,
+      [normalizedEmail, tokenHash, expiresAt]
+    );
+
+    await transporter.sendMail({
+      from: fromEmail,
+      to: user.email,
+      subject: "Your SpareParts Hub password reset token",
+      text: `Use this token to reset your password: ${rawToken}. It expires in 15 minutes.`,
+    });
+    log.info({ email: normalizedEmail }, "Password reset token sent");
+    return res.json(genericResponse);
+  } catch (err) {
+    log.error({ err, email: normalizedEmail }, "Forgot password failed");
+    return res
+      .status(500)
+      .json({ ok: false, message: "Could not process password reset request" });
+  }
+});
+
+router.post("/reset-password", async (req: Request, res: Response) => {
+  const log = req.log;
+  const { email, token, newPassword } = req.body as {
+    email?: string;
+    token?: string;
+    newPassword?: string;
+  };
+
+  if (!email || !token || !newPassword) {
+    return res.status(400).json({
+      ok: false,
+      message: "Email, token, and newPassword are required",
+    });
+  }
+
+  const passwordError = validatePassword(newPassword);
+  if (passwordError) {
+    return res.status(400).json({ ok: false, message: passwordError });
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+  const tokenHash = hashResetToken(token.trim());
+
+  try {
+    const { rows } = await query<{ token_hash: string }>(
+      `SELECT token_hash
+       FROM password_reset_tokens
+       WHERE email = $1 AND expires_at > NOW()
+       LIMIT 1`,
+      [normalizedEmail]
+    );
+    const resetRow = rows[0];
+    if (!resetRow) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "Invalid or expired reset token" });
+    }
+
+    const expected = Buffer.from(resetRow.token_hash, "hex");
+    const provided = Buffer.from(tokenHash, "hex");
+    if (
+      expected.length !== provided.length ||
+      !timingSafeEqual(expected, provided)
+    ) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "Invalid or expired reset token" });
+    }
+
+    const passwordHash = await hashPassword(newPassword);
+    const updateResult = await query(
+      "UPDATE users SET password_hash = $1 WHERE LOWER(email) = $2",
+      [passwordHash, normalizedEmail]
+    );
+    await query("DELETE FROM password_reset_tokens WHERE email = $1", [
+      normalizedEmail,
+    ]);
+
+    if (!updateResult.rowCount) {
+      return res.status(404).json({ ok: false, message: "User not found" });
+    }
+
+    log.info({ email: normalizedEmail }, "Password reset successful");
+    return res.json({ ok: true, message: "Password reset successful" });
+  } catch (err) {
+    log.error({ err, email: normalizedEmail }, "Reset password failed");
+    return res.status(500).json({ ok: false, message: "Could not reset password" });
+  }
 });
 
 async function handleVerifyEmail(req: Request, res: Response) {
