@@ -21,7 +21,7 @@ router.post("/", async (req: Request, res: Response) => {
   try {
     await query(
       "INSERT INTO orders (id, user_id, status, items) VALUES ($1, $2, $3, $4::jsonb)",
-      [id, userId, "pending", itemsJson]
+      [id, userId, "pending", itemsJson],
     );
     log.info({ orderId: id, userId }, "Order created");
     return res.status(201).json({
@@ -36,12 +36,42 @@ router.post("/", async (req: Request, res: Response) => {
   }
 });
 
+router.get("/user/:userId", async (req: Request, res: Response) => {
+  const { userId } = req.params;
+  const { rows } = await query<{
+    id: string;
+    user_id: string;
+    status: string;
+    created_at: string;
+    items: unknown;
+  }>(
+    `SELECT id, user_id, status, created_at, items
+     FROM orders
+     WHERE user_id = $1
+     ORDER BY created_at DESC`,
+    [userId],
+  );
+
+  return res.json({
+    ok: true,
+    orders: rows.map((order) => ({
+      id: order.id,
+      userId: order.user_id,
+      status: order.status,
+      createdAt: order.created_at,
+      items: order.items ?? [],
+    })),
+  });
+});
+
 router.get("/:orderId", async (req: Request, res: Response) => {
   const { orderId } = req.params;
-  const { rows } = await query<{ id: string; user_id: string; status: string; items: unknown }>(
-    "SELECT id, user_id, status, items FROM orders WHERE id = $1",
-    [orderId]
-  );
+  const { rows } = await query<{
+    id: string;
+    user_id: string;
+    status: string;
+    items: unknown;
+  }>("SELECT id, user_id, status, items FROM orders WHERE id = $1", [orderId]);
   const order = rows[0];
   if (!order) {
     return res.status(404).json({ ok: false, message: "Order not found" });

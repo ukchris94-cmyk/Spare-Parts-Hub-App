@@ -415,4 +415,63 @@ router.post("/user/vehicles", async (req: Request, res: Response) => {
   }
 });
 
+
+
+router.get("/profile", async (req: Request, res: Response) => {
+  const requestedUserId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+
+  try {
+    const userId = await resolveUserId(requestedUserId || undefined);
+    if (!userId) {
+      return res.status(404).json({ ok: false, message: "User not found" });
+    }
+
+    const userResult = await query<UserRow>(
+      "SELECT id, email, role FROM users WHERE id = $1",
+      [userId],
+    );
+    const user = userResult.rows[0];
+
+    if (!user) {
+      return res.status(404).json({ ok: false, message: "User not found" });
+    }
+
+    return res.json({
+      ok: true,
+      id: user.id,
+      email: user.email,
+      role: user.role,
+    });
+  } catch (err) {
+    req.log.error({ err, requestedUserId }, "Profile fetch failed");
+    return res.status(500).json({ ok: false, message: "Could not load profile" });
+  }
+});
+
+router.delete("/user/vehicles/:vehicleId", async (req: Request, res: Response) => {
+  const { vehicleId } = req.params;
+  const requestedUserId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+
+  try {
+    const userId = await resolveUserId(requestedUserId || undefined);
+    if (!userId) {
+      return res.status(404).json({ ok: false, message: "User not found" });
+    }
+
+    const result = await query(
+      "DELETE FROM vehicles WHERE id = $1 AND user_id = $2",
+      [vehicleId, userId],
+    );
+
+    if (!result.rowCount) {
+      return res.status(404).json({ ok: false, message: "Vehicle not found" });
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    req.log.error({ err, vehicleId, requestedUserId }, "Vehicle delete failed");
+    return res.status(500).json({ ok: false, message: "Could not delete vehicle" });
+  }
+});
+
 export default router;
