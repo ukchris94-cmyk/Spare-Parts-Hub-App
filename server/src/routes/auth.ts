@@ -262,6 +262,7 @@ router.post("/forgot-password", async (req: Request, res: Response) => {
     const rawToken = randomBytes(24).toString("base64url");
     const tokenHash = hashResetToken(rawToken);
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    const resetLink = `sparepartshubmobileclean://reset-password?email=${encodeURIComponent(normalizedEmail)}&token=${encodeURIComponent(rawToken)}`;
 
     await query(
       `INSERT INTO password_reset_tokens (email, token_hash, expires_at)
@@ -273,8 +274,11 @@ router.post("/forgot-password", async (req: Request, res: Response) => {
     await transporter.sendMail({
       from: fromEmail,
       to: user.email,
-      subject: "Your SpareParts Hub password reset token",
-      text: `Use this token to reset your password: ${rawToken}. It expires in 15 minutes.`,
+      subject: "Reset your SpareParts Hub password",
+      text:
+        `Tap this link to reset your password: ${resetLink}\n\n` +
+        `Or enter this token manually in the app: ${rawToken}\n` +
+        `This token expires in 15 minutes.`,
     });
     log.info({ email: normalizedEmail }, "Password reset token sent");
     return res.json(genericResponse);
