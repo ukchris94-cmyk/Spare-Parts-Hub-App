@@ -28,6 +28,10 @@ function validatePassword(password: string): string | null {
   return null;
 }
 
+function isValidRole(role: string): boolean {
+  return ["mechanic", "vendor", "dispatcher", "user"].includes(role);
+}
+
 async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16).toString("hex");
   const key = (await scryptAsync(password, salt, 64)) as Buffer;
@@ -70,7 +74,7 @@ router.post("/signup", async (req: Request, res: Response) => {
   }
 
   const normalizedRole = String(role).toLowerCase().trim();
-  if (!normalizedRole) {
+  if (!normalizedRole || !isValidRole(normalizedRole)) {
     return res.status(400).json({ ok: false, message: "Invalid role" });
   }
   const passwordError = validatePassword(password);
