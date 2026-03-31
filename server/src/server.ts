@@ -40,12 +40,24 @@ app.get("/health", async (_req, res) => {
     res.status(503).json({ status: "degraded", service: "spareparts-hub", db: "disconnected" });
   }
 });
+app.get("/api/health", async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ status: "ok", service: "spareparts-hub", db: "connected" });
+  } catch (e) {
+    logger.warn({ err: e }, "Health check: DB not connected");
+    res.status(503).json({ status: "degraded", service: "spareparts-hub", db: "disconnected" });
+  }
+});
 
 // Support both `/api/auth/*` (older clients) and `/auth/*` (new mobile app)
 app.use("/auth", authRouter);
 app.use("/api/auth", authRouter);
+app.use("/parts", partsRouter);
 app.use("/api/parts", partsRouter);
+app.use("/orders", ordersRouter);
 app.use("/api/orders", ordersRouter);
+app.use("/users", usersRouter);
 app.use("/api/users", usersRouter);
 app.use("/home", homeRouter);
 app.use("/api/home", homeRouter);

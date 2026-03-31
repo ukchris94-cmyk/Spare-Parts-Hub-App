@@ -40,6 +40,69 @@ router.get("/search", async (req: Request, res: Response) => {
   });
 });
 
+router.get("/:partId", async (req: Request, res: Response) => {
+  const { partId } = req.params;
+  const { rows } = await query<{
+    id: string;
+    name: string;
+    description: string | null;
+    role: string | null;
+    created_at: string;
+  }>(
+    `SELECT id, name, description, role, created_at
+     FROM parts
+     WHERE id = $1`,
+    [partId],
+  );
+
+  const part = rows[0];
+  if (!part) {
+    return res.status(404).json({ ok: false, message: "Part not found" });
+  }
+
+  return res.json({
+    ok: true,
+    part,
+  });
+});
+
+router.post("/", async (req: Request, res: Response) => {
+  const log = req.log;
+  const { name, description, role } = req.body as {
+    name?: string;
+    description?: string;
+    role?: string;
+  };
+
+  const normalizedName = typeof name === "string" ? name.trim() : "";
+  const normalizedDescription =
+    typeof description === "string" ? description.trim() : "";
+  const normalizedRole = typeof role === "string" ? role.trim().toLowerCase() : null;
+
+  if (!normalizedName) {
+    return res.status(400).json({ ok: false, message: "name is required" });
+  }
+
+  const id = genId("part");
+  try {
+    await query(
+      "INSERT INTO parts (id, name, description, role) VALUES ($1, $2, $3, $4)",
+      [id, normalizedName, normalizedDescription || null, normalizedRole],
+    );
+    log.info({ id, role: normalizedRole }, "Part created");
+    return res.status(201).json({
+      ok: true,
+      id,
+      name: normalizedName,
+      description: normalizedDescription || null,
+      role: normalizedRole,
+    });
+  } catch (err) {
+    log.error({ err, name: normalizedName }, "Part create failed");
+    throw err;
+  }
+});
+
 router.post("/requests", async (req: Request, res: Response) => {
   const log = req.log;
   const { userId, vehicle, partDescription, urgency } = req.body as {
