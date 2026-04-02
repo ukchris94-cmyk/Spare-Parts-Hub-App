@@ -9,7 +9,6 @@ function genId(prefix: string): string {
 
 type UserRow = {
   id: string;
-  first_name: string | null;
   email: string;
   role: string;
 };
@@ -92,15 +91,6 @@ function buildKnownIssuePartNames(make?: string | null, model?: string | null): 
   return ["Brake Pads", "Oil Filter", "Battery"];
 }
 
-function formatFirstName(user: Pick<UserRow, "first_name" | "email">): string {
-  const direct = typeof user.first_name === "string" ? user.first_name.trim() : "";
-  if (direct) return direct;
-  const localPart = (user.email.split("@")[0] ?? "").trim();
-  const token = (localPart.split(/[._-]/)[0] ?? localPart).replace(/[^a-zA-Z'-]/g, "");
-  if (!token) return "Alex";
-  return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
-}
-
 function fallbackHomePayload() {
   return {
     userName: "Alex",
@@ -148,7 +138,7 @@ function fallbackHomePayload() {
 async function resolveUserId(requestedUserId?: string): Promise<string | null> {
   if (requestedUserId) {
     const userResult = await query<UserRow>(
-      "SELECT id, first_name, email, role FROM users WHERE id = $1",
+      "SELECT id, email, role FROM users WHERE id = $1",
       [requestedUserId]
     );
     return userResult.rows[0]?.id ?? null;
@@ -156,13 +146,13 @@ async function resolveUserId(requestedUserId?: string): Promise<string | null> {
 
   try {
     const userResult = await query<UserRow>(
-      "SELECT id, first_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
+      "SELECT id, email, role FROM users ORDER BY created_at DESC LIMIT 1"
     );
     return userResult.rows[0]?.id ?? null;
   } catch (err) {
     if (!isDbColumnError(err)) throw err;
     const userResult = await query<UserRow>(
-      "SELECT id, first_name, email, role FROM users ORDER BY id DESC LIMIT 1"
+      "SELECT id, email, role FROM users ORDER BY id DESC LIMIT 1"
     );
     return userResult.rows[0]?.id ?? null;
   }
@@ -177,21 +167,21 @@ router.get("/user", async (req: Request, res: Response) => {
     let user: UserRow | undefined;
     if (userId) {
       const userResult = await query<UserRow>(
-        "SELECT id, first_name, email, role FROM users WHERE id = $1",
+        "SELECT id, email, role FROM users WHERE id = $1",
         [userId]
       );
       user = userResult.rows[0];
     } else {
       try {
         const userResult = await query<UserRow>(
-          "SELECT id, first_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
+          "SELECT id, email, role FROM users ORDER BY created_at DESC LIMIT 1"
         );
         user = userResult.rows[0];
       } catch (err) {
         if (!isDbColumnError(err)) throw err;
         log.warn({ err }, "Falling back to users ORDER BY id (created_at missing)");
         const userResult = await query<UserRow>(
-          "SELECT id, first_name, email, role FROM users ORDER BY id DESC LIMIT 1"
+          "SELECT id, email, role FROM users ORDER BY id DESC LIMIT 1"
         );
         user = userResult.rows[0];
       }
@@ -267,7 +257,7 @@ router.get("/user", async (req: Request, res: Response) => {
     const hotNewParts = trendingParts.slice(0, 4);
 
     return res.json({
-      userName: formatFirstName(user),
+      userName: user.email.split("@")[0],
       subtitle:
         "Browse genuine parts, track your orders and manage your vehicles.",
       vehicles,
@@ -437,7 +427,7 @@ router.get("/profile", async (req: Request, res: Response) => {
     }
 
     const userResult = await query<UserRow>(
-      "SELECT id, first_name, email, role FROM users WHERE id = $1",
+      "SELECT id, email, role FROM users WHERE id = $1",
       [userId],
     );
     const user = userResult.rows[0];

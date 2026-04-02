@@ -3,8 +3,6 @@
 
 CREATE TABLE IF NOT EXISTS users (
   id         TEXT PRIMARY KEY,
-  first_name TEXT,
-  last_name  TEXT,
   email      TEXT NOT NULL UNIQUE,
   password_hash TEXT,
   role       TEXT NOT NULL,
@@ -13,8 +11,6 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (LOWER(email));
 

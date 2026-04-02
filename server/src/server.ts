@@ -9,7 +9,6 @@ import partsRouter from "./routes/parts";
 import ordersRouter from "./routes/orders";
 import usersRouter from "./routes/users";
 import homeRouter from "./routes/home";
-import servicesRouter from "./routes/services";
 
 dotenv.config();
 
@@ -62,8 +61,6 @@ app.use("/users", usersRouter);
 app.use("/api/users", usersRouter);
 app.use("/home", homeRouter);
 app.use("/api/home", homeRouter);
-app.use("/services", servicesRouter);
-app.use("/api/services", servicesRouter);
 
 const PORT = process.env.PORT || 4000;
 
