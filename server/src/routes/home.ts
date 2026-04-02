@@ -9,6 +9,7 @@ function genId(prefix: string): string {
 
 type UserRow = {
   id: string;
+  first_name?: string | null;
   email: string;
   role: string;
 };
@@ -91,6 +92,54 @@ function buildKnownIssuePartNames(make?: string | null, model?: string | null): 
   return ["Brake Pads", "Oil Filter", "Battery"];
 }
 
+function firstNameFromEmail(email: string): string {
+  const localPart = (email.split("@")[0] ?? "").trim();
+  const token = (localPart.split(/[._-]/)[0] ?? localPart).replace(
+    /[^a-zA-Z'-]/g,
+    ""
+  );
+  if (!token) return "Alex";
+  return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+}
+
+function displayFirstName(user: UserRow): string {
+  const raw = typeof user.first_name === "string" ? user.first_name.trim() : "";
+  return raw || firstNameFromEmail(user.email);
+}
+
+async function selectUserById(id: string): Promise<UserRow | undefined> {
+  try {
+    const result = await query<UserRow>(
+      "SELECT id, first_name, email, role FROM users WHERE id = $1",
+      [id]
+    );
+    return result.rows[0];
+  } catch (err) {
+    if (!isDbColumnError(err)) throw err;
+    const result = await query<UserRow>(
+      "SELECT id, email, role FROM users WHERE id = $1",
+      [id]
+    );
+    return result.rows[0];
+  }
+}
+
+async function selectLatestUser(orderByCreatedAt: boolean): Promise<UserRow | undefined> {
+  const orderSql = orderByCreatedAt ? "ORDER BY created_at DESC" : "ORDER BY id DESC";
+  try {
+    const result = await query<UserRow>(
+      `SELECT id, first_name, email, role FROM users ${orderSql} LIMIT 1`
+    );
+    return result.rows[0];
+  } catch (err) {
+    if (!isDbColumnError(err)) throw err;
+    const result = await query<UserRow>(
+      `SELECT id, email, role FROM users ${orderSql} LIMIT 1`
+    );
+    return result.rows[0];
+  }
+}
+
 function fallbackHomePayload() {
   return {
     userName: "Alex",
@@ -137,24 +186,14 @@ function fallbackHomePayload() {
 
 async function resolveUserId(requestedUserId?: string): Promise<string | null> {
   if (requestedUserId) {
-    const userResult = await query<UserRow>(
-      "SELECT id, email, role FROM users WHERE id = $1",
-      [requestedUserId]
-    );
-    return userResult.rows[0]?.id ?? null;
+    return (await selectUserById(requestedUserId))?.id ?? null;
   }
 
   try {
-    const userResult = await query<UserRow>(
-      "SELECT id, email, role FROM users ORDER BY created_at DESC LIMIT 1"
-    );
-    return userResult.rows[0]?.id ?? null;
+    return (await selectLatestUser(true))?.id ?? null;
   } catch (err) {
     if (!isDbColumnError(err)) throw err;
-    const userResult = await query<UserRow>(
-      "SELECT id, email, role FROM users ORDER BY id DESC LIMIT 1"
-    );
-    return userResult.rows[0]?.id ?? null;
+    return (await selectLatestUser(false))?.id ?? null;
   }
 }
 
@@ -166,24 +205,14 @@ router.get("/user", async (req: Request, res: Response) => {
   try {
     let user: UserRow | undefined;
     if (userId) {
-      const userResult = await query<UserRow>(
-        "SELECT id, email, role FROM users WHERE id = $1",
-        [userId]
-      );
-      user = userResult.rows[0];
+      user = await selectUserById(userId);
     } else {
       try {
-        const userResult = await query<UserRow>(
-          "SELECT id, email, role FROM users ORDER BY created_at DESC LIMIT 1"
-        );
-        user = userResult.rows[0];
+        user = await selectLatestUser(true);
       } catch (err) {
         if (!isDbColumnError(err)) throw err;
         log.warn({ err }, "Falling back to users ORDER BY id (created_at missing)");
-        const userResult = await query<UserRow>(
-          "SELECT id, email, role FROM users ORDER BY id DESC LIMIT 1"
-        );
-        user = userResult.rows[0];
+        user = await selectLatestUser(false);
       }
     }
 
@@ -257,7 +286,7 @@ router.get("/user", async (req: Request, res: Response) => {
     const hotNewParts = trendingParts.slice(0, 4);
 
     return res.json({
-      userName: user.email.split("@")[0],
+      userName: displayFirstName(user),
       subtitle:
         "Browse genuine parts, track your orders and manage your vehicles.",
       vehicles,
@@ -426,11 +455,7 @@ router.get("/profile", async (req: Request, res: Response) => {
       return res.status(404).json({ ok: false, message: "User not found" });
     }
 
-    const userResult = await query<UserRow>(
-      "SELECT id, email, role FROM users WHERE id = $1",
-      [userId],
-    );
-    const user = userResult.rows[0];
+    const user = await selectUserById(userId);
 
     if (!user) {
       return res.status(404).json({ ok: false, message: "User not found" });
@@ -439,6 +464,7 @@ router.get("/profile", async (req: Request, res: Response) => {
     return res.json({
       ok: true,
       id: user.id,
+      firstName: displayFirstName(user),
       email: user.email,
       role: user.role,
     });
