@@ -141,3 +141,73 @@ Recommended next steps:
 
 This scaffold is intentionally minimal but opinionated, so you can iterate quickly on both the UI and backend while keeping the structure clear. If you tell me your preferred database and auth provider, I can extend the server skeleton to match.
 
+---
+
+## Client Demo Runbook (Current Build)
+
+### 1) Deploy and verify API
+
+```bash
+cd server
+npm run migrate
+npm run build
+pm2 restart spare-parts-hub
+curl http://<SERVER_IP>/api/health
+```
+
+### 2) First-name greeting (no email on homepage)
+
+- `POST /api/auth/signup` now accepts `firstName` and stores it.
+- `POST /api/auth/login` returns `firstName`.
+- `GET /api/home/user` now returns `userName` as first name (fallback: parsed cleanly from email prefix).
+
+Quick check:
+
+```bash
+curl -X POST http://<SERVER_IP>/api/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"role":"user","email":"jane.doe@example.com","password":"StrongPass123","firstName":"Jane"}'
+```
+
+Then verify and login, then:
+
+```bash
+curl "http://<SERVER_IP>/api/home/user"
+```
+
+### 3) Towing service quote demo
+
+```bash
+curl -X POST http://<SERVER_IP>/api/services/towing/quote \
+  -H "Content-Type: application/json" \
+  -d '{"distanceKm":42,"priority":"urgent","vehicleType":"suv","isRemote":true}'
+```
+
+### 4) Mechanic repair pricing demo
+
+```bash
+curl -X POST http://<SERVER_IP>/api/services/mechanic/quote \
+  -H "Content-Type: application/json" \
+  -d '{"serviceType":"brake-repair","laborHours":2.5,"partsCost":48000,"isRemote":false,"complexity":"medium"}'
+```
+
+### 5) Demo flow for client presentation
+
+1. Sign up as a `user` with `firstName`.
+2. Verify email code and log in.
+3. Open home dashboard and show `Hello, <FirstName>`.
+4. Add vehicle and refresh home.
+5. Open “Quick service picks”.
+6. Show towing quote (`/api/services/towing/quote`).
+7. Show mechanic quote (`/api/services/mechanic/quote`).
+
+### Optional: login button lag checks
+
+- On mobile, disable login button while request is in-flight (`isLoading`) to prevent duplicate taps.
+- Ensure frontend API URL points to the backend root (`.../api`) and not a nested path.
+- Clear Metro cache once before demo:
+
+```bash
+cd mobile
+npx expo start -c
+```
