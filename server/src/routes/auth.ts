@@ -29,7 +29,7 @@ function validatePassword(password: string): string | null {
 }
 
 function isValidRole(role: string): boolean {
-  return ["mechanic", "vendor", "dispatcher", "user"].includes(role);
+  return ["mechanic", "vendor", "dispatcher", "admin", "user"].includes(role);
 }
 
 async function hashPassword(password: string): Promise<string> {
