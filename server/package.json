@@ -7,7 +7,8 @@
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "migrate": "ts-node -r dotenv/config src/db/migrate.ts"
+    "migrate": "ts-node -r dotenv/config src/db/migrate.ts",
+    "promote-admin": "ts-node -r dotenv/config src/scripts/promote-admin.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

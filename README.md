@@ -109,6 +109,9 @@ This starts the Expo dev server; you can use:
 ### Authentication & Onboarding
 
 - **Role selection**: user chooses _Mechanic_, _Vendor_, _Dispatcher_, or _Regular User_.
+- **Admin accounts**: cannot sign up publicly; promote an existing user from backend only:
+  - `cd server`
+  - `npm run promote-admin -- --email admin@example.com`
 - **Role‑specific sign‑up**:
   - All: name, email, phone, password, city.
   - Mechanic: workshop details, services, preferred brands.
@@ -140,4 +143,3 @@ Recommended next steps:
 - Add proper authentication (JWT, refresh tokens) and validation.
 
 This scaffold is intentionally minimal but opinionated, so you can iterate quickly on both the UI and backend while keeping the structure clear. If you tell me your preferred database and auth provider, I can extend the server skeleton to match.
-
