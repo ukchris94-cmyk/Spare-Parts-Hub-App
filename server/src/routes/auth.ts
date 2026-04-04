@@ -51,6 +51,15 @@ function hashResetToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+function isDbColumnError(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code?: string }).code === "42703"
+  );
+}
+
 function normalizeFirstName(value?: string): string | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -108,10 +117,18 @@ router.post("/signup", async (req: Request, res: Response) => {
     }
     const userId = genId("usr");
     const passwordHash = await hashPassword(password);
-    await query(
-      "INSERT INTO users (id, first_name, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, $5, FALSE)",
-      [userId, normalizedFirstName, normalizedEmail, passwordHash, normalizedRole]
-    );
+    try {
+      await query(
+        "INSERT INTO users (id, first_name, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, $5, FALSE)",
+        [userId, normalizedFirstName, normalizedEmail, passwordHash, normalizedRole]
+      );
+    } catch (err) {
+      if (!isDbColumnError(err)) throw err;
+      await query(
+        "INSERT INTO users (id, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, FALSE)",
+        [userId, normalizedEmail, passwordHash, normalizedRole]
+      );
+    }
     log.info({ userId, email: normalizedEmail, role: normalizedRole }, "User created");
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
@@ -196,17 +213,38 @@ router.post("/login", async (req: Request, res: Response) => {
   }
 
   const normalizedEmail = email.toLowerCase().trim();
-  const { rows } = await query<{
+  type LoginUserRow = {
     id: string;
     first_name: string | null;
     email: string;
     role: string;
     verified: boolean;
     password_hash: string | null;
-  }>(
-    "SELECT id, first_name, email, role, verified, password_hash FROM users WHERE LOWER(email) = $1",
-    [normalizedEmail]
-  );
+  };
+  let rows: LoginUserRow[] = [];
+  try {
+    const result = await query<LoginUserRow>(
+      "SELECT id, first_name, email, role, verified, password_hash FROM users WHERE LOWER(email) = $1",
+      [normalizedEmail]
+    );
+    rows = result.rows;
+  } catch (err) {
+    if (!isDbColumnError(err)) throw err;
+    const result = await query<{
+      id: string;
+      email: string;
+      role: string;
+      verified: boolean;
+      password_hash: string | null;
+    }>(
+      "SELECT id, email, role, verified, password_hash FROM users WHERE LOWER(email) = $1",
+      [normalizedEmail]
+    );
+    rows = result.rows.map((row) => ({
+      ...row,
+      first_name: null,
+    }));
+  }
   const user = rows[0];
 
   if (!user || !user.password_hash) {
