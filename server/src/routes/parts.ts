@@ -19,7 +19,7 @@ router.get("/search", async (req: Request, res: Response) => {
   const categoryFilter =
     typeof category === "string" ? category.trim().toLowerCase() : "";
 
-  let sql = "SELECT id, name, description, role FROM parts WHERE 1=1";
+  let sql = "SELECT id, name, description, image_url, role FROM parts WHERE 1=1";
   const params: string[] = [];
   let i = 1;
   if (search) {
@@ -39,7 +39,13 @@ router.get("/search", async (req: Request, res: Response) => {
   }
   sql += " ORDER BY name LIMIT 50";
 
-  const { rows } = await query<{ id: string; name: string; description: string | null; role: string | null }>(
+  const { rows } = await query<{
+    id: string;
+    name: string;
+    description: string | null;
+    image_url: string | null;
+    role: string | null;
+  }>(
     sql,
     params
   );
@@ -54,15 +60,18 @@ router.get("/search", async (req: Request, res: Response) => {
 
 router.post("/", async (req: Request, res: Response) => {
   const log = req.log;
-  const { name, description, role } = req.body as {
+  const { name, description, imageUrl, role } = req.body as {
     name?: string;
     description?: string;
+    imageUrl?: string;
     role?: string;
   };
 
   const normalizedName = typeof name === "string" ? name.trim() : "";
   const normalizedDescription =
     typeof description === "string" ? description.trim() : "";
+  const normalizedImageUrl =
+    typeof imageUrl === "string" && imageUrl.trim() ? imageUrl.trim() : null;
   const normalizedRole = typeof role === "string" ? role.trim().toLowerCase() : null;
 
   if (!normalizedName) {
@@ -72,8 +81,8 @@ router.post("/", async (req: Request, res: Response) => {
   const id = genId("part");
   try {
     await query(
-      "INSERT INTO parts (id, name, description, role) VALUES ($1, $2, $3, $4)",
-      [id, normalizedName, normalizedDescription || null, normalizedRole],
+      "INSERT INTO parts (id, name, description, image_url, role) VALUES ($1, $2, $3, $4, $5)",
+      [id, normalizedName, normalizedDescription || null, normalizedImageUrl, normalizedRole],
     );
     log.info({ id, role: normalizedRole }, "Part created");
     return res.status(201).json({
@@ -81,6 +90,7 @@ router.post("/", async (req: Request, res: Response) => {
       id,
       name: normalizedName,
       description: normalizedDescription || null,
+      imageUrl: normalizedImageUrl,
       role: normalizedRole,
     });
   } catch (err) {
@@ -232,10 +242,11 @@ router.get("/:partId", async (req: Request, res: Response) => {
     id: string;
     name: string;
     description: string | null;
+    image_url: string | null;
     role: string | null;
     created_at: string;
   }>(
-    `SELECT id, name, description, role, created_at
+    `SELECT id, name, description, image_url, role, created_at
      FROM parts
      WHERE id = $1`,
     [partId],
@@ -248,7 +259,10 @@ router.get("/:partId", async (req: Request, res: Response) => {
 
   return res.json({
     ok: true,
-    part,
+    part: {
+      ...part,
+      imageUrl: part.image_url,
+    },
   });
 });
 

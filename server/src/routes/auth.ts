@@ -51,12 +51,23 @@ function hashResetToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+function normalizeFirstName(value?: string): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const firstToken = trimmed.split(/\s+/)[0] ?? "";
+  if (!firstToken) return null;
+  return firstToken;
+}
+
 router.post("/signup", async (req: Request, res: Response) => {
   const log = req.log;
-  const { role, email, password } = req.body as {
+  const { role, email, password, firstName, fullName } = req.body as {
     role?: string;
     email?: string;
     password?: string;
+    firstName?: string;
+    fullName?: string;
   };
 
   if (!email || !role || !password) {
@@ -77,6 +88,8 @@ router.post("/signup", async (req: Request, res: Response) => {
   if (!normalizedRole || !isValidRole(normalizedRole)) {
     return res.status(400).json({ ok: false, message: "Invalid role" });
   }
+  const normalizedFirstName =
+    normalizeFirstName(firstName) ?? normalizeFirstName(fullName);
   const passwordError = validatePassword(password);
   if (passwordError) {
     return res.status(400).json({ ok: false, message: passwordError });
@@ -96,8 +109,8 @@ router.post("/signup", async (req: Request, res: Response) => {
     const userId = genId("usr");
     const passwordHash = await hashPassword(password);
     await query(
-      "INSERT INTO users (id, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, FALSE)",
-      [userId, normalizedEmail, passwordHash, normalizedRole]
+      "INSERT INTO users (id, first_name, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, $5, FALSE)",
+      [userId, normalizedFirstName, normalizedEmail, passwordHash, normalizedRole]
     );
     log.info({ userId, email: normalizedEmail, role: normalizedRole }, "User created");
 
@@ -185,12 +198,13 @@ router.post("/login", async (req: Request, res: Response) => {
   const normalizedEmail = email.toLowerCase().trim();
   const { rows } = await query<{
     id: string;
+    first_name: string | null;
     email: string;
     role: string;
     verified: boolean;
     password_hash: string | null;
   }>(
-    "SELECT id, email, role, verified, password_hash FROM users WHERE LOWER(email) = $1",
+    "SELECT id, first_name, email, role, verified, password_hash FROM users WHERE LOWER(email) = $1",
     [normalizedEmail]
   );
   const user = rows[0];
@@ -225,6 +239,7 @@ router.post("/login", async (req: Request, res: Response) => {
     ok: true,
     message: "Login success",
     userId: user.id,
+    firstName: user.first_name ?? undefined,
     email: user.email,
     role: user.role,
     token,
