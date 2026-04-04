@@ -61,6 +61,27 @@ app.use("/users", usersRouter);
 app.use("/api/users", usersRouter);
 app.use("/home", homeRouter);
 app.use("/api/home", homeRouter);
+// Compatibility mounts for clients that already include `/home` in API_URL
+// and then append feature paths like `/home/profile` or `/orders/user/:id`.
+app.use("/home/home", homeRouter);
+app.use("/api/home/home", homeRouter);
+app.use("/home/orders", ordersRouter);
+app.use("/api/home/orders", ordersRouter);
+app.use("/home/parts", partsRouter);
+app.use("/api/home/parts", partsRouter);
+
+app.use((req: Request, res: Response) => {
+  req.log.warn(
+    { method: req.method, path: req.originalUrl },
+    "Route not found"
+  );
+  res.status(404).json({
+    ok: false,
+    message: "Route not found",
+    method: req.method,
+    path: req.originalUrl,
+  });
+});
 
 const PORT = process.env.PORT || 4000;
 

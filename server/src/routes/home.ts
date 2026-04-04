@@ -188,6 +188,22 @@ router.get("/user", async (req: Request, res: Response) => {
       }
     }
 
+    if (!user && userId) {
+      log.warn({ requestedUserId: userId }, "Requested user not found, falling back to latest user");
+      try {
+        const fallbackResult = await query<UserRow>(
+          "SELECT id, first_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
+        );
+        user = fallbackResult.rows[0];
+      } catch (err) {
+        if (!isDbColumnError(err)) throw err;
+        const fallbackResult = await query<UserRow>(
+          "SELECT id, first_name, email, role FROM users ORDER BY id DESC LIMIT 1"
+        );
+        user = fallbackResult.rows[0];
+      }
+    }
+
     if (!user) {
       return res.status(404).json({ ok: false, message: "User not found" });
     }
@@ -425,9 +441,20 @@ router.get("/profile", async (req: Request, res: Response) => {
   const requestedUserId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
 
   try {
-    const userId = await resolveUserId(requestedUserId || undefined);
+    let userId = await resolveUserId(requestedUserId || undefined);
+    if (!userId && requestedUserId) {
+      req.log.warn(
+        { requestedUserId },
+        "Requested profile user not found, falling back to latest user"
+      );
+      userId = await resolveUserId(undefined);
+    }
     if (!userId) {
-      return res.status(404).json({ ok: false, message: "User not found" });
+      return res.status(404).json({
+        ok: false,
+        message: "User not found",
+        requestedUserId: requestedUserId || undefined,
+      });
     }
 
     const userResult = await query<UserRow>(
