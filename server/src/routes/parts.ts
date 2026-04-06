@@ -7,6 +7,26 @@ function genId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function isDbColumnError(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code?: string }).code === "42703"
+  );
+}
+
+function toNullableInt(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
 router.get("/search", async (req: Request, res: Response) => {
   const { query: q, role, category } = req.query as {
     query?: string;
@@ -19,7 +39,8 @@ router.get("/search", async (req: Request, res: Response) => {
   const categoryFilter =
     typeof category === "string" ? category.trim().toLowerCase() : "";
 
-  let sql = "SELECT id, name, description, image_url, role FROM parts WHERE 1=1";
+  let sql =
+    "SELECT id, name, description, image_url, price_ngn, stock_qty, role FROM parts WHERE 1=1";
   const params: string[] = [];
   let i = 1;
   if (search) {
@@ -39,32 +60,66 @@ router.get("/search", async (req: Request, res: Response) => {
   }
   sql += " ORDER BY name LIMIT 50";
 
-  const { rows } = await query<{
+  let rows: Array<{
     id: string;
     name: string;
     description: string | null;
     image_url: string | null;
+    price_ngn: number | null;
+    stock_qty: number | null;
     role: string | null;
-  }>(
-    sql,
-    params
-  );
+  }> = [];
+  try {
+    const result = await query<{
+      id: string;
+      name: string;
+      description: string | null;
+      image_url: string | null;
+      price_ngn: number | null;
+      stock_qty: number | null;
+      role: string | null;
+    }>(sql, params);
+    rows = result.rows;
+  } catch (err) {
+    if (!isDbColumnError(err)) throw err;
+    const legacySql = sql
+      .replace("price_ngn, stock_qty, ", "")
+      .replace("SELECT id, name, description, image_url, role", "SELECT id, name, description, image_url, role");
+    const result = await query<{
+      id: string;
+      name: string;
+      description: string | null;
+      image_url: string | null;
+      role: string | null;
+    }>(legacySql, params);
+    rows = result.rows.map((row) => ({
+      ...row,
+      price_ngn: null,
+      stock_qty: null,
+    }));
+  }
   log.debug({ query: search, role: roleFilter, count: rows.length }, "Parts search");
   return res.json({
     query: search,
     role: roleFilter ?? undefined,
     category: categoryFilter || undefined,
-    results: rows,
+    results: rows.map((row) => ({
+      ...row,
+      priceNgn: row.price_ngn,
+      stockQty: row.stock_qty,
+    })),
   });
 });
 
 router.post("/", async (req: Request, res: Response) => {
   const log = req.log;
-  const { name, description, imageUrl, role } = req.body as {
+  const { name, description, imageUrl, role, priceNgn, stockQty } = req.body as {
     name?: string;
     description?: string;
     imageUrl?: string;
     role?: string;
+    priceNgn?: number | string;
+    stockQty?: number | string;
   };
 
   const normalizedName = typeof name === "string" ? name.trim() : "";
@@ -73,17 +128,46 @@ router.post("/", async (req: Request, res: Response) => {
   const normalizedImageUrl =
     typeof imageUrl === "string" && imageUrl.trim() ? imageUrl.trim() : null;
   const normalizedRole = typeof role === "string" ? role.trim().toLowerCase() : null;
+  const normalizedPriceNgn = toNullableInt(priceNgn);
+  const normalizedStockQty = toNullableInt(stockQty);
 
   if (!normalizedName) {
     return res.status(400).json({ ok: false, message: "name is required" });
   }
+  if (normalizedRole === "vendor" && (!normalizedPriceNgn || normalizedPriceNgn <= 0)) {
+    return res
+      .status(400)
+      .json({ ok: false, message: "priceNgn is required for vendor parts" });
+  }
+  if (normalizedPriceNgn !== null && normalizedPriceNgn <= 0) {
+    return res.status(400).json({ ok: false, message: "priceNgn must be a positive number" });
+  }
+  if (normalizedStockQty !== null && normalizedStockQty < 0) {
+    return res.status(400).json({ ok: false, message: "stockQty cannot be negative" });
+  }
 
   const id = genId("part");
   try {
-    await query(
-      "INSERT INTO parts (id, name, description, image_url, role) VALUES ($1, $2, $3, $4, $5)",
-      [id, normalizedName, normalizedDescription || null, normalizedImageUrl, normalizedRole],
-    );
+    try {
+      await query(
+        "INSERT INTO parts (id, name, description, image_url, price_ngn, stock_qty, role) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        [
+          id,
+          normalizedName,
+          normalizedDescription || null,
+          normalizedImageUrl,
+          normalizedPriceNgn,
+          normalizedStockQty,
+          normalizedRole,
+        ],
+      );
+    } catch (err) {
+      if (!isDbColumnError(err)) throw err;
+      await query(
+        "INSERT INTO parts (id, name, description, image_url, role) VALUES ($1, $2, $3, $4, $5)",
+        [id, normalizedName, normalizedDescription || null, normalizedImageUrl, normalizedRole],
+      );
+    }
     log.info({ id, role: normalizedRole }, "Part created");
     return res.status(201).json({
       ok: true,
@@ -91,6 +175,8 @@ router.post("/", async (req: Request, res: Response) => {
       name: normalizedName,
       description: normalizedDescription || null,
       imageUrl: normalizedImageUrl,
+      priceNgn: normalizedPriceNgn,
+      stockQty: normalizedStockQty,
       role: normalizedRole,
     });
   } catch (err) {
@@ -187,17 +273,47 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
     return res.status(404).json({ ok: false, message: "Request not found" });
   }
 
-  const partRowsResult = await query<{
+  let offerRows: Array<{
     id: string;
     name: string;
     description: string | null;
-  }>(
-    `SELECT id, name, description
-     FROM parts
-     WHERE role = 'vendor'
-     ORDER BY created_at DESC
-     LIMIT 6`
-  );
+    price_ngn: number | null;
+    stock_qty: number | null;
+  }> = [];
+  try {
+    const partRowsResult = await query<{
+      id: string;
+      name: string;
+      description: string | null;
+      price_ngn: number | null;
+      stock_qty: number | null;
+    }>(
+      `SELECT id, name, description, price_ngn, stock_qty
+       FROM parts
+       WHERE role = 'vendor'
+       ORDER BY created_at DESC
+       LIMIT 6`
+    );
+    offerRows = partRowsResult.rows;
+  } catch (err) {
+    if (!isDbColumnError(err)) throw err;
+    const partRowsResult = await query<{
+      id: string;
+      name: string;
+      description: string | null;
+    }>(
+      `SELECT id, name, description
+       FROM parts
+       WHERE role = 'vendor'
+       ORDER BY created_at DESC
+       LIMIT 6`
+    );
+    offerRows = partRowsResult.rows.map((row) => ({
+      ...row,
+      price_ngn: null,
+      stock_qty: null,
+    }));
+  }
 
   const fallbackNames = [
     "QuickFix Spares",
@@ -208,8 +324,8 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
     "Metro Spares",
   ];
 
-  const offers = partRowsResult.rows.slice(0, 5).map((part, index) => {
-    const base = 35000 + index * 7000;
+  const offers = offerRows.slice(0, 5).map((part, index) => {
+    const base = typeof part.price_ngn === "number" ? part.price_ngn : 35000 + index * 7000;
     const urgencyBonus = requestRow.urgency === "urgent" ? 3000 : 0;
     return {
       id: `off_${requestId}_${index + 1}`,
@@ -221,6 +337,7 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
       eta: `${35 + index * 20} mins`,
       total: base + urgencyBonus,
       currency: "NGN",
+      stockQty: part.stock_qty,
     };
   });
 
@@ -238,19 +355,54 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
 
 router.get("/:partId", async (req: Request, res: Response) => {
   const { partId } = req.params;
-  const { rows } = await query<{
+  let rows: Array<{
     id: string;
     name: string;
     description: string | null;
     image_url: string | null;
+    price_ngn: number | null;
+    stock_qty: number | null;
     role: string | null;
     created_at: string;
-  }>(
-    `SELECT id, name, description, image_url, role, created_at
-     FROM parts
-     WHERE id = $1`,
-    [partId],
-  );
+  }> = [];
+  try {
+    const result = await query<{
+      id: string;
+      name: string;
+      description: string | null;
+      image_url: string | null;
+      price_ngn: number | null;
+      stock_qty: number | null;
+      role: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, name, description, image_url, price_ngn, stock_qty, role, created_at
+       FROM parts
+       WHERE id = $1`,
+      [partId],
+    );
+    rows = result.rows;
+  } catch (err) {
+    if (!isDbColumnError(err)) throw err;
+    const result = await query<{
+      id: string;
+      name: string;
+      description: string | null;
+      image_url: string | null;
+      role: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, name, description, image_url, role, created_at
+       FROM parts
+       WHERE id = $1`,
+      [partId],
+    );
+    rows = result.rows.map((row) => ({
+      ...row,
+      price_ngn: null,
+      stock_qty: null,
+    }));
+  }
 
   const part = rows[0];
   if (!part) {
@@ -262,6 +414,8 @@ router.get("/:partId", async (req: Request, res: Response) => {
     part: {
       ...part,
       imageUrl: part.image_url,
+      priceNgn: part.price_ngn,
+      stockQty: part.stock_qty,
     },
   });
 });

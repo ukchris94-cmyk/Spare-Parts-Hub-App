@@ -76,8 +76,12 @@ CREATE TABLE IF NOT EXISTS parts (
   name        TEXT NOT NULL,
   description TEXT,
   image_url   TEXT,
+  price_ngn   INTEGER,
+  stock_qty   INTEGER,
   role        TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS image_url TEXT;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS price_ngn INTEGER;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS stock_qty INTEGER;
