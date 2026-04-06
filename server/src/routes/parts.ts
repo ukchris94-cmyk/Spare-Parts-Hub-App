@@ -185,6 +185,155 @@ router.post("/", async (req: Request, res: Response) => {
   }
 });
 
+router.patch("/:partId", async (req: Request, res: Response) => {
+  const { partId } = req.params;
+  const log = req.log;
+  const { name, description, imageUrl, priceNgn, stockQty } = req.body as {
+    name?: string;
+    description?: string;
+    imageUrl?: string;
+    priceNgn?: number | string;
+    stockQty?: number | string;
+  };
+
+  const normalizedName = typeof name === "string" ? name.trim() : undefined;
+  const normalizedDescription =
+    typeof description === "string" ? description.trim() : undefined;
+  const normalizedImageUrl =
+    typeof imageUrl === "string" ? imageUrl.trim() : undefined;
+  const normalizedPriceNgn = toNullableInt(priceNgn);
+  const normalizedStockQty = toNullableInt(stockQty);
+
+  if (normalizedPriceNgn !== null && normalizedPriceNgn <= 0) {
+    return res.status(400).json({ ok: false, message: "priceNgn must be a positive number" });
+  }
+  if (normalizedStockQty !== null && normalizedStockQty < 0) {
+    return res.status(400).json({ ok: false, message: "stockQty cannot be negative" });
+  }
+
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  let index = 1;
+
+  if (normalizedName !== undefined) {
+    if (!normalizedName) {
+      return res.status(400).json({ ok: false, message: "name cannot be empty" });
+    }
+    fields.push(`name = $${index++}`);
+    values.push(normalizedName);
+  }
+  if (normalizedDescription !== undefined) {
+    fields.push(`description = $${index++}`);
+    values.push(normalizedDescription || null);
+  }
+  if (normalizedImageUrl !== undefined) {
+    fields.push(`image_url = $${index++}`);
+    values.push(normalizedImageUrl || null);
+  }
+  if (priceNgn !== undefined) {
+    fields.push(`price_ngn = $${index++}`);
+    values.push(normalizedPriceNgn);
+  }
+  if (stockQty !== undefined) {
+    fields.push(`stock_qty = $${index++}`);
+    values.push(normalizedStockQty);
+  }
+
+  if (!fields.length) {
+    return res.status(400).json({ ok: false, message: "No fields to update" });
+  }
+
+  values.push(partId);
+
+  try {
+    let rows: Array<{
+      id: string;
+      name: string;
+      description: string | null;
+      image_url: string | null;
+      price_ngn: number | null;
+      stock_qty: number | null;
+      role: string | null;
+    }> = [];
+    try {
+      const result = await query<{
+        id: string;
+        name: string;
+        description: string | null;
+        image_url: string | null;
+        price_ngn: number | null;
+        stock_qty: number | null;
+        role: string | null;
+      }>(
+        `UPDATE parts
+         SET ${fields.join(", ")}
+         WHERE id = $${index}
+         RETURNING id, name, description, image_url, price_ngn, stock_qty, role`,
+        values,
+      );
+      rows = result.rows;
+    } catch (err) {
+      if (!isDbColumnError(err)) throw err;
+      const legacyFields = fields
+        .filter((field) => !field.startsWith("price_ngn") && !field.startsWith("stock_qty"));
+      const legacyValues = values.slice(0, values.length - 1);
+      legacyValues.push(partId);
+      if (!legacyFields.length) {
+        return res.status(400).json({
+          ok: false,
+          message: "This server schema does not support price/stock updates yet.",
+        });
+      }
+      const result = await query<{
+        id: string;
+        name: string;
+        description: string | null;
+        image_url: string | null;
+        role: string | null;
+      }>(
+        `UPDATE parts
+         SET ${legacyFields.join(", ")}
+         WHERE id = $${legacyFields.length + 1}
+         RETURNING id, name, description, image_url, role`,
+        legacyValues,
+      );
+      rows = result.rows.map((row) => ({
+        ...row,
+        price_ngn: null,
+        stock_qty: null,
+      }));
+    }
+
+    const part = rows[0];
+    if (!part) {
+      return res.status(404).json({ ok: false, message: "Part not found" });
+    }
+
+    log.info({ partId }, "Part updated");
+    return res.json({
+      ok: true,
+      part: {
+        ...part,
+        imageUrl: part.image_url,
+        priceNgn: part.price_ngn,
+        stockQty: part.stock_qty,
+      },
+    });
+  } catch (err) {
+    log.error({ err, partId }, "Part update failed");
+    throw err;
+  }
+});
+
+router.delete("/:partId", async (req: Request, res: Response) => {
+  const { partId } = req.params;
+  const result = await query("DELETE FROM parts WHERE id = $1", [partId]);
+  if (!result.rowCount) {
+    return res.status(404).json({ ok: false, message: "Part not found" });
+  }
+  return res.json({ ok: true });
+});
+
 router.post("/requests", async (req: Request, res: Response) => {
   const log = req.log;
   const { userId, vehicle, partDescription, urgency } = req.body as {
