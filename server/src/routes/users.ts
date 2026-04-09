@@ -9,6 +9,7 @@ function genId(prefix: string): string {
 
 type UserRow = {
   id: string;
+  first_name: string | null;
   email: string;
   role: string;
 };
@@ -39,6 +40,7 @@ type PartRow = {
   id: string;
   name: string;
   description: string | null;
+  image_url: string | null;
   role: string | null;
 };
 
@@ -58,7 +60,7 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
 
   try {
     const { rows: userRows } = await query<UserRow>(
-      "SELECT id, email, role FROM users WHERE id = $1",
+      "SELECT id, first_name, email, role FROM users WHERE id = $1",
       [userId]
     );
     const user = userRows[0];
@@ -90,7 +92,7 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
     ).length;
 
     const { rows: partsRows } = await query<PartRow>(
-      `SELECT id, name, description, role
+      `SELECT id, name, description, image_url, role
        FROM parts
        ORDER BY created_at DESC
        LIMIT 8`
@@ -115,6 +117,10 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
       ok: true,
       user: {
         id: user.id,
+        firstName:
+          typeof user.first_name === "string" && user.first_name.trim()
+            ? user.first_name.trim()
+            : "",
         email: user.email,
         role: user.role,
       },
@@ -133,13 +139,19 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
         pendingCount,
       },
       recommendations: {
-        trendingParts: partsRows,
+        trendingParts: partsRows.map((part) => ({
+          ...part,
+          imageUrl: part.image_url,
+        })),
         quickService: {
           knownIssueParts: knownIssuePartNames.map((name) => ({
             name,
             query: name,
           })),
-          hotNewParts,
+          hotNewParts: hotNewParts.map((part) => ({
+            ...part,
+            imageUrl: part.image_url,
+          })),
         },
       },
     });

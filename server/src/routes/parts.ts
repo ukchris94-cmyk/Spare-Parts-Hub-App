@@ -40,7 +40,19 @@ router.get("/search", async (req: Request, res: Response) => {
     typeof category === "string" ? category.trim().toLowerCase() : "";
 
   let sql =
-    "SELECT id, name, description, image_url, price_ngn, stock_qty, role FROM parts WHERE 1=1";
+    `SELECT
+      p.id,
+      p.name,
+      p.description,
+      p.image_url,
+      p.user_id,
+      p.price_ngn,
+      p.stock_qty,
+      p.role,
+      COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name
+     FROM parts p
+     LEFT JOIN users u ON u.id = p.user_id
+     WHERE 1=1`;
   const params: string[] = [];
   let i = 1;
   if (search) {
@@ -65,9 +77,11 @@ router.get("/search", async (req: Request, res: Response) => {
     name: string;
     description: string | null;
     image_url: string | null;
+    user_id: string | null;
     price_ngn: number | null;
     stock_qty: number | null;
     role: string | null;
+    vendor_name: string | null;
   }> = [];
   try {
     const result = await query<{
@@ -75,25 +89,32 @@ router.get("/search", async (req: Request, res: Response) => {
       name: string;
       description: string | null;
       image_url: string | null;
+      user_id: string | null;
       price_ngn: number | null;
       stock_qty: number | null;
       role: string | null;
+      vendor_name: string | null;
     }>(sql, params);
     rows = result.rows;
   } catch (err) {
     if (!isDbColumnError(err)) throw err;
     const legacySql = sql
-      .replace("price_ngn, stock_qty, ", "")
-      .replace("SELECT id, name, description, image_url, role", "SELECT id, name, description, image_url, role");
+      .replace("p.user_id,", "")
+      .replace("COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name", "NULL::text AS vendor_name")
+      .replace("p.price_ngn, p.stock_qty,", "")
+      .replace("LEFT JOIN users u ON u.id = p.user_id", "")
+      .replace(/p\./g, "");
     const result = await query<{
       id: string;
       name: string;
       description: string | null;
       image_url: string | null;
       role: string | null;
+      vendor_name: string | null;
     }>(legacySql, params);
     rows = result.rows.map((row) => ({
       ...row,
+      user_id: null,
       price_ngn: null,
       stock_qty: null,
     }));
@@ -105,6 +126,8 @@ router.get("/search", async (req: Request, res: Response) => {
     category: categoryFilter || undefined,
     results: rows.map((row) => ({
       ...row,
+      userId: row.user_id,
+      vendorName: row.vendor_name,
       priceNgn: row.price_ngn,
       stockQty: row.stock_qty,
     })),
@@ -113,7 +136,8 @@ router.get("/search", async (req: Request, res: Response) => {
 
 router.post("/", async (req: Request, res: Response) => {
   const log = req.log;
-  const { name, description, imageUrl, role, priceNgn, stockQty } = req.body as {
+  const { userId, name, description, imageUrl, role, priceNgn, stockQty } = req.body as {
+    userId?: string;
     name?: string;
     description?: string;
     imageUrl?: string;
@@ -127,6 +151,7 @@ router.post("/", async (req: Request, res: Response) => {
     typeof description === "string" ? description.trim() : "";
   const normalizedImageUrl =
     typeof imageUrl === "string" && imageUrl.trim() ? imageUrl.trim() : null;
+  const normalizedUserId = typeof userId === "string" && userId.trim() ? userId.trim() : null;
   const normalizedRole = typeof role === "string" ? role.trim().toLowerCase() : null;
   const normalizedPriceNgn = toNullableInt(priceNgn);
   const normalizedStockQty = toNullableInt(stockQty);
@@ -150,12 +175,13 @@ router.post("/", async (req: Request, res: Response) => {
   try {
     try {
       await query(
-        "INSERT INTO parts (id, name, description, image_url, price_ngn, stock_qty, role) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO parts (id, name, description, image_url, user_id, price_ngn, stock_qty, role) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         [
           id,
           normalizedName,
           normalizedDescription || null,
           normalizedImageUrl,
+          normalizedUserId,
           normalizedPriceNgn,
           normalizedStockQty,
           normalizedRole,
@@ -172,6 +198,7 @@ router.post("/", async (req: Request, res: Response) => {
     return res.status(201).json({
       ok: true,
       id,
+      userId: normalizedUserId,
       name: normalizedName,
       description: normalizedDescription || null,
       imageUrl: normalizedImageUrl,
@@ -509,6 +536,8 @@ router.get("/:partId", async (req: Request, res: Response) => {
     name: string;
     description: string | null;
     image_url: string | null;
+    user_id: string | null;
+    vendor_name: string | null;
     price_ngn: number | null;
     stock_qty: number | null;
     role: string | null;
@@ -520,14 +549,27 @@ router.get("/:partId", async (req: Request, res: Response) => {
       name: string;
       description: string | null;
       image_url: string | null;
+      user_id: string | null;
+      vendor_name: string | null;
       price_ngn: number | null;
       stock_qty: number | null;
       role: string | null;
       created_at: string;
     }>(
-      `SELECT id, name, description, image_url, price_ngn, stock_qty, role, created_at
-       FROM parts
-       WHERE id = $1`,
+      `SELECT
+         p.id,
+         p.name,
+         p.description,
+         p.image_url,
+         p.user_id,
+         COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name,
+         p.price_ngn,
+         p.stock_qty,
+         p.role,
+         p.created_at
+       FROM parts p
+       LEFT JOIN users u ON u.id = p.user_id
+       WHERE p.id = $1`,
       [partId],
     );
     rows = result.rows;
@@ -538,16 +580,18 @@ router.get("/:partId", async (req: Request, res: Response) => {
       name: string;
       description: string | null;
       image_url: string | null;
+      vendor_name: string | null;
       role: string | null;
       created_at: string;
     }>(
-      `SELECT id, name, description, image_url, role, created_at
+      `SELECT id, name, description, image_url, NULL::text AS vendor_name, role, created_at
        FROM parts
        WHERE id = $1`,
       [partId],
     );
     rows = result.rows.map((row) => ({
       ...row,
+      user_id: null,
       price_ngn: null,
       stock_qty: null,
     }));
@@ -562,6 +606,8 @@ router.get("/:partId", async (req: Request, res: Response) => {
     ok: true,
     part: {
       ...part,
+      userId: part.user_id,
+      vendorName: part.vendor_name,
       imageUrl: part.image_url,
       priceNgn: part.price_ngn,
       stockQty: part.stock_qty,

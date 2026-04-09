@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS parts (
   name        TEXT NOT NULL,
   description TEXT,
   image_url   TEXT,
+  user_id     TEXT REFERENCES users(id) ON DELETE SET NULL,
   price_ngn   INTEGER,
   stock_qty   INTEGER,
   role        TEXT,
@@ -83,5 +84,7 @@ CREATE TABLE IF NOT EXISTS parts (
 );
 
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS image_url TEXT;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS price_ngn INTEGER;
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS stock_qty INTEGER;
+CREATE INDEX IF NOT EXISTS idx_parts_user ON parts (user_id);

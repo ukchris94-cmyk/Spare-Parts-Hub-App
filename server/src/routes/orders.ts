@@ -91,14 +91,75 @@ router.get("/user/:userId", async (req: Request, res: Response) => {
     [userId],
   );
 
+  const orders = rows.map((order) => ({
+    id: order.id,
+    userId: order.user_id,
+    status: order.status,
+    createdAt: order.created_at,
+    items: Array.isArray(order.items) ? order.items : [],
+  }));
+
+  const partIds = Array.from(
+    new Set(
+      orders.flatMap((order) =>
+        order.items
+          .map((item: any) =>
+            typeof item?.partId === "string" && item.partId.trim()
+              ? item.partId.trim()
+              : null,
+          )
+          .filter((id: string | null): id is string => id !== null),
+      ),
+    ),
+  );
+
+  let vendorByPartId = new Map<string, string>();
+  if (partIds.length > 0) {
+    try {
+      const { rows: vendorRows } = await query<{
+        part_id: string;
+        vendor_name: string | null;
+      }>(
+        `SELECT
+           p.id AS part_id,
+           COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1), 'Vendor') AS vendor_name
+         FROM parts p
+         LEFT JOIN users u ON u.id = p.user_id
+         WHERE p.id = ANY($1::text[])`,
+        [partIds],
+      );
+      vendorByPartId = new Map(
+        vendorRows.map((row) => [row.part_id, row.vendor_name ?? "Vendor"]),
+      );
+    } catch (err) {
+      req.log.warn({ err }, "Skipping vendor enrichment for orders");
+    }
+  }
+
   return res.json({
     ok: true,
-    orders: rows.map((order) => ({
-      id: order.id,
-      userId: order.user_id,
-      status: order.status,
-      createdAt: order.created_at,
-      items: order.items ?? [],
+    orders: orders.map((order) => ({
+      ...order,
+      items: order.items.map((item: any) => {
+        const partId =
+          typeof item?.partId === "string" && item.partId.trim()
+            ? item.partId.trim()
+            : "";
+        const existingVendorName =
+          typeof item?.vendorName === "string" && item.vendorName.trim()
+            ? item.vendorName.trim()
+            : typeof item?.vendor_name === "string" && item.vendor_name.trim()
+              ? item.vendor_name.trim()
+              : "";
+        const resolvedVendorName =
+          existingVendorName ||
+          (partId ? vendorByPartId.get(partId) : undefined) ||
+          "Vendor";
+        return {
+          ...item,
+          vendorName: resolvedVendorName,
+        };
+      }),
     })),
   });
 });
