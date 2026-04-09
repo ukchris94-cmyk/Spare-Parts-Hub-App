@@ -216,6 +216,7 @@ router.post("/login", async (req: Request, res: Response) => {
   type LoginUserRow = {
     id: string;
     first_name: string | null;
+    last_name: string | null;
     email: string;
     role: string;
     verified: boolean;
@@ -224,7 +225,7 @@ router.post("/login", async (req: Request, res: Response) => {
   let rows: LoginUserRow[] = [];
   try {
     const result = await query<LoginUserRow>(
-      "SELECT id, first_name, email, role, verified, password_hash FROM users WHERE LOWER(email) = $1",
+      "SELECT id, first_name, last_name, email, role, verified, password_hash FROM users WHERE LOWER(email) = $1",
       [normalizedEmail]
     );
     rows = result.rows;
@@ -243,6 +244,7 @@ router.post("/login", async (req: Request, res: Response) => {
     rows = result.rows.map((row) => ({
       ...row,
       first_name: null,
+      last_name: null,
     }));
   }
   const user = rows[0];
@@ -278,6 +280,7 @@ router.post("/login", async (req: Request, res: Response) => {
     message: "Login success",
     userId: user.id,
     firstName: user.first_name ?? undefined,
+    lastName: user.last_name ?? undefined,
     email: user.email,
     role: user.role,
     token,

@@ -10,6 +10,7 @@ function genId(prefix: string): string {
 type UserRow = {
   id: string;
   first_name: string | null;
+  last_name: string | null;
   email: string;
   role: string;
 };
@@ -60,7 +61,7 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
 
   try {
     const { rows: userRows } = await query<UserRow>(
-      "SELECT id, first_name, email, role FROM users WHERE id = $1",
+      "SELECT id, first_name, last_name, email, role FROM users WHERE id = $1",
       [userId]
     );
     const user = userRows[0];
@@ -120,6 +121,10 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
         firstName:
           typeof user.first_name === "string" && user.first_name.trim()
             ? user.first_name.trim()
+            : "",
+        lastName:
+          typeof user.last_name === "string" && user.last_name.trim()
+            ? user.last_name.trim()
             : "",
         email: user.email,
         role: user.role,

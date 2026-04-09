@@ -10,6 +10,7 @@ function genId(prefix: string): string {
 type UserRow = {
   id: string;
   first_name: string | null;
+  last_name: string | null;
   email: string;
   role: string;
 };
@@ -30,6 +31,7 @@ type PartRow = {
   id: string;
   name: string;
   description: string | null;
+  image_url: string | null;
 };
 
 function isDbColumnError(err: unknown): boolean {
@@ -139,7 +141,7 @@ function fallbackHomePayload() {
 async function resolveUserId(requestedUserId?: string): Promise<string | null> {
   if (requestedUserId) {
     const userResult = await query<UserRow>(
-      "SELECT id, first_name, email, role FROM users WHERE id = $1",
+      "SELECT id, first_name, last_name, email, role FROM users WHERE id = $1",
       [requestedUserId]
     );
     return userResult.rows[0]?.id ?? null;
@@ -147,13 +149,13 @@ async function resolveUserId(requestedUserId?: string): Promise<string | null> {
 
   try {
     const userResult = await query<UserRow>(
-      "SELECT id, first_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
+      "SELECT id, first_name, last_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
     );
     return userResult.rows[0]?.id ?? null;
   } catch (err) {
     if (!isDbColumnError(err)) throw err;
     const userResult = await query<UserRow>(
-      "SELECT id, first_name, email, role FROM users ORDER BY id DESC LIMIT 1"
+      "SELECT id, first_name, last_name, email, role FROM users ORDER BY id DESC LIMIT 1"
     );
     return userResult.rows[0]?.id ?? null;
   }
@@ -168,21 +170,21 @@ router.get("/user", async (req: Request, res: Response) => {
     let user: UserRow | undefined;
     if (userId) {
       const userResult = await query<UserRow>(
-        "SELECT id, first_name, email, role FROM users WHERE id = $1",
+        "SELECT id, first_name, last_name, email, role FROM users WHERE id = $1",
         [userId]
       );
       user = userResult.rows[0];
     } else {
       try {
         const userResult = await query<UserRow>(
-          "SELECT id, first_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
+          "SELECT id, first_name, last_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
         );
         user = userResult.rows[0];
       } catch (err) {
         if (!isDbColumnError(err)) throw err;
         log.warn({ err }, "Falling back to users ORDER BY id (created_at missing)");
         const userResult = await query<UserRow>(
-          "SELECT id, first_name, email, role FROM users ORDER BY id DESC LIMIT 1"
+          "SELECT id, first_name, last_name, email, role FROM users ORDER BY id DESC LIMIT 1"
         );
         user = userResult.rows[0];
       }
@@ -192,13 +194,13 @@ router.get("/user", async (req: Request, res: Response) => {
       log.warn({ requestedUserId: userId }, "Requested user not found, falling back to latest user");
       try {
         const fallbackResult = await query<UserRow>(
-          "SELECT id, first_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
+          "SELECT id, first_name, last_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
         );
         user = fallbackResult.rows[0];
       } catch (err) {
         if (!isDbColumnError(err)) throw err;
         const fallbackResult = await query<UserRow>(
-          "SELECT id, first_name, email, role FROM users ORDER BY id DESC LIMIT 1"
+          "SELECT id, first_name, last_name, email, role FROM users ORDER BY id DESC LIMIT 1"
         );
         user = fallbackResult.rows[0];
       }
@@ -234,7 +236,7 @@ router.get("/user", async (req: Request, res: Response) => {
     let partsRows: PartRow[] = [];
     try {
       const partsResult = await query<PartRow>(
-        `SELECT id, name, description
+        `SELECT id, name, description, image_url
          FROM parts
          ORDER BY created_at DESC
          LIMIT 8`
@@ -244,7 +246,7 @@ router.get("/user", async (req: Request, res: Response) => {
       if (!isDbColumnError(err)) throw err;
       log.warn({ err }, "Falling back to legacy parts query");
       const partsResult = await query<PartRow>(
-        `SELECT id, name, description
+        `SELECT id, name, description, image_url
          FROM parts
          ORDER BY id DESC
          LIMIT 8`
@@ -263,6 +265,7 @@ router.get("/user", async (req: Request, res: Response) => {
       id: part.id,
       name: part.name,
       subtitle: part.description ?? "Top rated part",
+      imageUrl: part.image_url ?? undefined,
       query: part.name,
     }));
     const primaryVehicle =
@@ -278,6 +281,10 @@ router.get("/user", async (req: Request, res: Response) => {
         typeof user.first_name === "string" && user.first_name.trim()
           ? user.first_name.trim()
           : "Alex",
+      userLastName:
+        typeof user.last_name === "string" && user.last_name.trim()
+          ? user.last_name.trim()
+          : "",
       subtitle:
         "Browse genuine parts, track your orders and manage your vehicles.",
       vehicles,
@@ -458,7 +465,7 @@ router.get("/profile", async (req: Request, res: Response) => {
     }
 
     const userResult = await query<UserRow>(
-      "SELECT id, first_name, email, role FROM users WHERE id = $1",
+      "SELECT id, first_name, last_name, email, role FROM users WHERE id = $1",
       [userId],
     );
     const user = userResult.rows[0];
@@ -473,6 +480,10 @@ router.get("/profile", async (req: Request, res: Response) => {
       firstName:
         typeof user.first_name === "string" && user.first_name.trim()
           ? user.first_name.trim()
+          : "",
+      lastName:
+        typeof user.last_name === "string" && user.last_name.trim()
+          ? user.last_name.trim()
           : "",
       email: user.email,
       role: user.role,
