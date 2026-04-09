@@ -151,8 +151,13 @@ router.get("/user/:userId", async (req: Request, res: Response) => {
             : typeof item?.vendor_name === "string" && item.vendor_name.trim()
               ? item.vendor_name.trim()
               : "";
+        const normalizedExistingVendorName = existingVendorName.toLowerCase();
+        const hasPlaceholderVendorName =
+          normalizedExistingVendorName === "vendor" ||
+          normalizedExistingVendorName === "unknown vendor" ||
+          normalizedExistingVendorName === "n/a";
         const resolvedVendorName =
-          existingVendorName ||
+          (!hasPlaceholderVendorName ? existingVendorName : "") ||
           (partId ? vendorByPartId.get(partId) : undefined) ||
           "Vendor";
         return {
