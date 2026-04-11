@@ -179,11 +179,19 @@ router.get("/pending", async (req: Request, res: Response) => {
     status: string;
     created_at: string;
     items: unknown;
+    buyer_name: string | null;
   }>(
-    `SELECT id, user_id, status, created_at, items
-     FROM orders
+    `SELECT
+       o.id,
+       o.user_id,
+       o.status,
+       o.created_at,
+       o.items,
+       COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS buyer_name
+     FROM orders o
+     LEFT JOIN users u ON u.id = o.user_id
      WHERE status = ANY($1::text[])
-     ORDER BY created_at DESC
+     ORDER BY o.created_at DESC
      LIMIT $2`,
     [statuses, limit],
   );
@@ -193,6 +201,7 @@ router.get("/pending", async (req: Request, res: Response) => {
     orders: rows.map((order) => ({
       id: order.id,
       userId: order.user_id,
+      buyerName: order.buyer_name,
       status: order.status,
       createdAt: order.created_at,
       items: order.items ?? [],

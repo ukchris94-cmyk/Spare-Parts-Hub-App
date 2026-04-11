@@ -28,14 +28,16 @@ function toNullableInt(value: unknown): number | null {
 }
 
 router.get("/search", async (req: Request, res: Response) => {
-  const { query: q, role, category } = req.query as {
+  const { query: q, role, category, userId } = req.query as {
     query?: string;
     role?: string;
     category?: string;
+    userId?: string;
   };
   const log = req.log;
   const search = typeof q === "string" ? q.trim() : "";
   const roleFilter = typeof role === "string" ? role.trim() : null;
+  const userIdFilter = typeof userId === "string" ? userId.trim() : null;
   const categoryFilter =
     typeof category === "string" ? category.trim().toLowerCase() : "";
 
@@ -57,20 +59,25 @@ router.get("/search", async (req: Request, res: Response) => {
   let i = 1;
   if (search) {
     params.push(`%${search}%`);
-    sql += ` AND (name ILIKE $${i} OR description ILIKE $${i})`;
+    sql += ` AND (p.name ILIKE $${i} OR p.description ILIKE $${i})`;
     i++;
   }
   if (roleFilter) {
     params.push(roleFilter);
-    sql += ` AND role = $${i}`;
+    sql += ` AND p.role = $${i}`;
+    i++;
+  }
+  if (userIdFilter) {
+    params.push(userIdFilter);
+    sql += ` AND p.user_id = $${i}`;
     i++;
   }
   if (categoryFilter && categoryFilter !== "all") {
     params.push(`%${categoryFilter}%`);
-    sql += ` AND (name ILIKE $${i} OR description ILIKE $${i})`;
+    sql += ` AND (p.name ILIKE $${i} OR p.description ILIKE $${i})`;
     i++;
   }
-  sql += " ORDER BY name LIMIT 50";
+  sql += " ORDER BY p.name LIMIT 50";
 
   let rows: Array<{
     id: string;
@@ -103,6 +110,7 @@ router.get("/search", async (req: Request, res: Response) => {
       .replace("COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name", "NULL::text AS vendor_name")
       .replace("p.price_ngn, p.stock_qty,", "")
       .replace("LEFT JOIN users u ON u.id = p.user_id", "")
+      .replace(/ AND p\.user_id = \$\d+/, "")
       .replace(/p\./g, "");
     const result = await query<{
       id: string;
@@ -119,10 +127,14 @@ router.get("/search", async (req: Request, res: Response) => {
       stock_qty: null,
     }));
   }
-  log.debug({ query: search, role: roleFilter, count: rows.length }, "Parts search");
+  log.debug(
+    { query: search, role: roleFilter, userId: userIdFilter, count: rows.length },
+    "Parts search",
+  );
   return res.json({
     query: search,
     role: roleFilter ?? undefined,
+    userId: userIdFilter ?? undefined,
     category: categoryFilter || undefined,
     results: rows.map((row) => ({
       ...row,
