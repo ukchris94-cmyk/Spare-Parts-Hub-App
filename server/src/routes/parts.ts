@@ -516,6 +516,53 @@ router.get("/requests/user/:userId", async (req: Request, res: Response) => {
   });
 });
 
+router.delete("/requests/:requestId", async (req: Request, res: Response) => {
+  const { requestId } = req.params;
+  const userIdFromQuery =
+    typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+  const userIdFromBody =
+    typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
+  const userId = userIdFromQuery || userIdFromBody;
+
+  if (!userId) {
+    return res.status(400).json({ ok: false, message: "userId is required" });
+  }
+
+  const requestLookup = await query<{
+    id: string;
+    user_id: string;
+    status: string;
+  }>(
+    `SELECT id, user_id, status
+     FROM part_requests
+     WHERE id = $1
+     LIMIT 1`,
+    [requestId],
+  );
+  const requestRow = requestLookup.rows[0];
+
+  if (!requestRow) {
+    return res.status(404).json({ ok: false, message: "Request not found" });
+  }
+  if (requestRow.user_id !== userId) {
+    return res.status(403).json({ ok: false, message: "Not allowed to delete this request" });
+  }
+  if (["matched", "closed"].includes(requestRow.status)) {
+    return res.status(409).json({
+      ok: false,
+      message: "Request already matched and cannot be deleted",
+    });
+  }
+
+  await query(
+    `DELETE FROM part_requests
+     WHERE id = $1`,
+    [requestId],
+  );
+
+  return res.json({ ok: true, requestId });
+});
+
 router.post("/requests/:requestId/quotes", async (req: Request, res: Response) => {
   const { requestId } = req.params;
   const log = req.log;
