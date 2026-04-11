@@ -71,6 +71,29 @@ CREATE TABLE IF NOT EXISTS part_requests (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS part_request_quotes (
+  id               TEXT PRIMARY KEY,
+  request_id       TEXT NOT NULL REFERENCES part_requests(id) ON DELETE CASCADE,
+  vendor_user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  part_id          TEXT REFERENCES parts(id) ON DELETE SET NULL,
+  price_ngn        INTEGER NOT NULL,
+  eta_minutes      INTEGER,
+  note             TEXT,
+  status           TEXT NOT NULL DEFAULT 'open',
+  counter_price_ngn INTEGER,
+  counter_note     TEXT,
+  countered_by     TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (request_id, vendor_user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_part_request_quotes_request
+  ON part_request_quotes (request_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_part_request_quotes_vendor
+  ON part_request_quotes (vendor_user_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS parts (
   id          TEXT PRIMARY KEY,
   name        TEXT NOT NULL,

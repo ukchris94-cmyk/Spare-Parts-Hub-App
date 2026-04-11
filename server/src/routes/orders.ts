@@ -62,6 +62,43 @@ router.post("/", async (req: Request, res: Response) => {
       "INSERT INTO orders (id, user_id, status, items) VALUES ($1, $2, $3, $4::jsonb)",
       [id, userId, "pending", itemsJson],
     );
+    const firstQuoteId =
+      Array.isArray(items) &&
+      typeof items[0] === "object" &&
+      items[0] &&
+      "sourceQuoteId" in items[0] &&
+      typeof (items[0] as { sourceQuoteId?: unknown }).sourceQuoteId === "string"
+        ? ((items[0] as { sourceQuoteId: string }).sourceQuoteId || "").trim()
+        : "";
+    const firstRequestId =
+      Array.isArray(items) &&
+      typeof items[0] === "object" &&
+      items[0] &&
+      "sourceRequestId" in items[0] &&
+      typeof (items[0] as { sourceRequestId?: unknown }).sourceRequestId === "string"
+        ? ((items[0] as { sourceRequestId: string }).sourceRequestId || "").trim()
+        : "";
+    if (firstQuoteId && firstRequestId) {
+      await query(
+        `UPDATE part_request_quotes
+         SET status = 'accepted', updated_at = NOW()
+         WHERE id = $1 AND request_id = $2`,
+        [firstQuoteId, firstRequestId],
+      );
+      await query(
+        `UPDATE part_request_quotes
+         SET status = CASE WHEN id = $1 THEN status ELSE 'closed' END,
+             updated_at = NOW()
+         WHERE request_id = $2`,
+        [firstQuoteId, firstRequestId],
+      );
+      await query(
+        `UPDATE part_requests
+         SET status = 'matched'
+         WHERE id = $1`,
+        [firstRequestId],
+      );
+    }
     log.info({ orderId: id, userId }, "Order created");
     return res.status(201).json({
       id,

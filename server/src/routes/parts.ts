@@ -408,6 +408,70 @@ router.post("/requests", async (req: Request, res: Response) => {
   }
 });
 
+router.get("/requests/open", async (req: Request, res: Response) => {
+  const vendorUserId =
+    typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+  const limitRaw =
+    typeof req.query.limit === "string"
+      ? Number.parseInt(req.query.limit, 10)
+      : 20;
+  const limit =
+    Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 50) : 20;
+
+  const { rows } = await query<{
+    id: string;
+    user_id: string;
+    vehicle: string | null;
+    part_description: string | null;
+    urgency: string | null;
+    status: string;
+    created_at: string;
+    requester_name: string | null;
+  }>(
+    `SELECT
+       pr.id,
+       pr.user_id,
+       pr.vehicle,
+       pr.part_description,
+       pr.urgency,
+       pr.status,
+       pr.created_at,
+       COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS requester_name
+     FROM part_requests pr
+     LEFT JOIN users u ON u.id = pr.user_id
+     WHERE pr.status IN ('open', 'quoted')
+     ORDER BY pr.created_at DESC
+     LIMIT $1`,
+    [limit],
+  );
+
+  let quotedRequestIds = new Set<string>();
+  if (vendorUserId) {
+    const quoteRows = await query<{ request_id: string }>(
+      `SELECT request_id
+       FROM part_request_quotes
+       WHERE vendor_user_id = $1`,
+      [vendorUserId],
+    );
+    quotedRequestIds = new Set(quoteRows.rows.map((row) => row.request_id));
+  }
+
+  return res.json({
+    ok: true,
+    requests: rows.map((row) => ({
+      id: row.id,
+      userId: row.user_id,
+      vehicle: row.vehicle,
+      partDescription: row.part_description,
+      urgency: row.urgency,
+      status: row.status,
+      createdAt: row.created_at,
+      requesterName: row.requester_name,
+      hasQuoted: vendorUserId ? quotedRequestIds.has(row.id) : false,
+    })),
+  });
+});
+
 router.get("/requests/user/:userId", async (req: Request, res: Response) => {
   const { userId } = req.params;
   const { rows } = await query<{
@@ -418,11 +482,22 @@ router.get("/requests/user/:userId", async (req: Request, res: Response) => {
     urgency: string | null;
     status: string;
     created_at: string;
+    quote_count: number;
   }>(
-    `SELECT id, user_id, vehicle, part_description, urgency, status, created_at
-     FROM part_requests
-     WHERE user_id = $1
-     ORDER BY created_at DESC`,
+    `SELECT
+       pr.id,
+       pr.user_id,
+       pr.vehicle,
+       pr.part_description,
+       pr.urgency,
+       pr.status,
+       pr.created_at,
+       COUNT(q.id)::int AS quote_count
+     FROM part_requests pr
+     LEFT JOIN part_request_quotes q ON q.request_id = pr.id
+     WHERE pr.user_id = $1
+     GROUP BY pr.id
+     ORDER BY pr.created_at DESC`,
     [userId]
   );
 
@@ -436,8 +511,236 @@ router.get("/requests/user/:userId", async (req: Request, res: Response) => {
       urgency: row.urgency,
       status: row.status,
       createdAt: row.created_at,
+      quoteCount: row.quote_count,
     })),
   });
+});
+
+router.post("/requests/:requestId/quotes", async (req: Request, res: Response) => {
+  const { requestId } = req.params;
+  const log = req.log;
+  const {
+    vendorUserId,
+    partId,
+    priceNgn,
+    etaMinutes,
+    note,
+  } = req.body as {
+    vendorUserId?: string;
+    partId?: string;
+    priceNgn?: number | string;
+    etaMinutes?: number | string;
+    note?: string;
+  };
+
+  const normalizedVendorUserId =
+    typeof vendorUserId === "string" ? vendorUserId.trim() : "";
+  const normalizedPartId = typeof partId === "string" && partId.trim() ? partId.trim() : null;
+  const normalizedPriceNgn = toNullableInt(priceNgn);
+  const normalizedEtaMinutes = toNullableInt(etaMinutes);
+  const normalizedNote = typeof note === "string" ? note.trim() : "";
+
+  if (!normalizedVendorUserId) {
+    return res.status(400).json({ ok: false, message: "vendorUserId is required" });
+  }
+  if (!normalizedPriceNgn || normalizedPriceNgn <= 0) {
+    return res.status(400).json({ ok: false, message: "priceNgn must be a positive number" });
+  }
+  if (normalizedEtaMinutes !== null && normalizedEtaMinutes <= 0) {
+    return res.status(400).json({ ok: false, message: "etaMinutes must be a positive number" });
+  }
+
+  const requestRow = await query<{ id: string }>(
+    `SELECT id FROM part_requests WHERE id = $1 LIMIT 1`,
+    [requestId],
+  );
+  if (!requestRow.rows[0]) {
+    return res.status(404).json({ ok: false, message: "Request not found" });
+  }
+
+  const quoteId = genId("qt");
+  const result = await query<{
+    id: string;
+    request_id: string;
+    vendor_user_id: string;
+    part_id: string | null;
+    price_ngn: number;
+    eta_minutes: number | null;
+    note: string | null;
+    status: string;
+    counter_price_ngn: number | null;
+    counter_note: string | null;
+    countered_by: string | null;
+    created_at: string;
+    updated_at: string;
+  }>(
+    `INSERT INTO part_request_quotes (
+       id, request_id, vendor_user_id, part_id, price_ngn, eta_minutes, note, status
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'open')
+     ON CONFLICT (request_id, vendor_user_id)
+     DO UPDATE SET
+       part_id = EXCLUDED.part_id,
+       price_ngn = EXCLUDED.price_ngn,
+       eta_minutes = EXCLUDED.eta_minutes,
+       note = EXCLUDED.note,
+       status = 'open',
+       counter_price_ngn = NULL,
+       counter_note = NULL,
+       countered_by = NULL,
+       updated_at = NOW()
+     RETURNING
+       id, request_id, vendor_user_id, part_id, price_ngn, eta_minutes, note,
+       status, counter_price_ngn, counter_note, countered_by, created_at, updated_at`,
+    [
+      quoteId,
+      requestId,
+      normalizedVendorUserId,
+      normalizedPartId,
+      normalizedPriceNgn,
+      normalizedEtaMinutes,
+      normalizedNote || null,
+    ],
+  );
+
+  await query(
+    `UPDATE part_requests
+     SET status = 'quoted'
+     WHERE id = $1 AND status = 'open'`,
+    [requestId],
+  );
+
+  log.info({ requestId, vendorUserId: normalizedVendorUserId }, "Quote saved");
+  return res.status(201).json({ ok: true, quote: result.rows[0] });
+});
+
+router.post("/requests/:requestId/quotes/:quoteId/counter", async (req: Request, res: Response) => {
+  const { requestId, quoteId } = req.params;
+  const {
+    userId,
+    priceNgn,
+    note,
+  } = req.body as {
+    userId?: string;
+    priceNgn?: number | string;
+    note?: string;
+  };
+
+  const normalizedUserId = typeof userId === "string" ? userId.trim() : "";
+  const normalizedPriceNgn = toNullableInt(priceNgn);
+  const normalizedNote = typeof note === "string" ? note.trim() : "";
+
+  if (!normalizedUserId) {
+    return res.status(400).json({ ok: false, message: "userId is required" });
+  }
+  if (!normalizedPriceNgn || normalizedPriceNgn <= 0) {
+    return res.status(400).json({ ok: false, message: "priceNgn must be a positive number" });
+  }
+
+  const result = await query<{
+    id: string;
+    counter_price_ngn: number | null;
+    counter_note: string | null;
+    status: string;
+  }>(
+    `UPDATE part_request_quotes
+     SET counter_price_ngn = $1,
+         counter_note = $2,
+         countered_by = 'mechanic',
+         status = 'countered',
+         updated_at = NOW()
+     WHERE id = $3 AND request_id = $4
+     RETURNING id, counter_price_ngn, counter_note, status`,
+    [normalizedPriceNgn, normalizedNote || null, quoteId, requestId],
+  );
+
+  if (!result.rows[0]) {
+    return res.status(404).json({ ok: false, message: "Quote not found" });
+  }
+
+  return res.json({ ok: true, quote: result.rows[0] });
+});
+
+router.post("/requests/:requestId/quotes/:quoteId/respond", async (req: Request, res: Response) => {
+  const { requestId, quoteId } = req.params;
+  const {
+    vendorUserId,
+    action,
+  } = req.body as {
+    vendorUserId?: string;
+    action?: string;
+  };
+
+  const normalizedVendorUserId =
+    typeof vendorUserId === "string" ? vendorUserId.trim() : "";
+  const normalizedAction = typeof action === "string" ? action.trim().toLowerCase() : "";
+
+  if (!normalizedVendorUserId) {
+    return res.status(400).json({ ok: false, message: "vendorUserId is required" });
+  }
+  if (!["accept_counter", "reject_counter"].includes(normalizedAction)) {
+    return res.status(400).json({ ok: false, message: "Invalid action" });
+  }
+
+  const sql =
+    normalizedAction === "accept_counter"
+      ? `UPDATE part_request_quotes
+         SET price_ngn = COALESCE(counter_price_ngn, price_ngn),
+             note = COALESCE(counter_note, note),
+             counter_price_ngn = NULL,
+             counter_note = NULL,
+             countered_by = NULL,
+             status = 'open',
+             updated_at = NOW()
+         WHERE id = $1 AND request_id = $2 AND vendor_user_id = $3
+         RETURNING id, status, price_ngn, note`
+      : `UPDATE part_request_quotes
+         SET counter_price_ngn = NULL,
+             counter_note = NULL,
+             countered_by = NULL,
+             status = 'open',
+             updated_at = NOW()
+         WHERE id = $1 AND request_id = $2 AND vendor_user_id = $3
+         RETURNING id, status, price_ngn, note`;
+
+  const result = await query(sql, [quoteId, requestId, normalizedVendorUserId]);
+  if (!result.rows[0]) {
+    return res.status(404).json({ ok: false, message: "Quote not found" });
+  }
+
+  return res.json({ ok: true, quote: result.rows[0] });
+});
+
+router.post("/requests/:requestId/quotes/:quoteId/accept", async (req: Request, res: Response) => {
+  const { requestId, quoteId } = req.params;
+
+  const quoteResult = await query<{ id: string; request_id: string }>(
+    `UPDATE part_request_quotes
+     SET status = 'accepted', updated_at = NOW()
+     WHERE id = $1 AND request_id = $2
+     RETURNING id, request_id`,
+    [quoteId, requestId],
+  );
+
+  if (!quoteResult.rows[0]) {
+    return res.status(404).json({ ok: false, message: "Quote not found" });
+  }
+
+  await query(
+    `UPDATE part_request_quotes
+     SET status = CASE WHEN id = $1 THEN status ELSE 'closed' END,
+         updated_at = NOW()
+     WHERE request_id = $2`,
+    [quoteId, requestId],
+  );
+  await query(
+    `UPDATE part_requests
+     SET status = 'matched'
+     WHERE id = $1`,
+    [requestId],
+  );
+
+  return res.json({ ok: true, quoteId, requestId });
 });
 
 router.get("/requests/:requestId/offers", async (req: Request, res: Response) => {
@@ -445,11 +748,14 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
 
   const requestResult = await query<{
     id: string;
+    user_id: string;
     vehicle: string | null;
     part_description: string | null;
     urgency: string | null;
+    status: string;
+    created_at: string;
   }>(
-    `SELECT id, vehicle, part_description, urgency
+    `SELECT id, user_id, vehicle, part_description, urgency, status, created_at
      FROM part_requests
      WHERE id = $1
      LIMIT 1`,
@@ -461,101 +767,94 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
     return res.status(404).json({ ok: false, message: "Request not found" });
   }
 
-  let offerRows: Array<{
+  const quotesResult = await query<{
     id: string;
-    name: string;
-    description: string | null;
-    price_ngn: number | null;
-    stock_qty: number | null;
+    request_id: string;
+    vendor_user_id: string;
+    part_id: string | null;
+    price_ngn: number;
+    eta_minutes: number | null;
+    note: string | null;
+    status: string;
+    counter_price_ngn: number | null;
+    counter_note: string | null;
+    countered_by: string | null;
+    created_at: string;
+    updated_at: string;
     vendor_name: string | null;
-  }> = [];
-  try {
-    const partRowsResult = await query<{
-      id: string;
-      name: string;
-      description: string | null;
-      price_ngn: number | null;
-      stock_qty: number | null;
-      vendor_name: string | null;
-    }>(
-      `SELECT
-         p.id,
-         p.name,
-         p.description,
-         p.price_ngn,
-         p.stock_qty,
-         COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name
-       FROM parts p
-       LEFT JOIN users u ON u.id = p.user_id
-       WHERE p.role = 'vendor'
-       ORDER BY p.created_at DESC
-       LIMIT 6`
-    );
-    offerRows = partRowsResult.rows;
-  } catch (err) {
-    if (!isDbColumnError(err)) throw err;
-    const partRowsResult = await query<{
-      id: string;
-      name: string;
-      description: string | null;
-      vendor_name: string | null;
-    }>(
-      `SELECT
-         p.id,
-         p.name,
-         p.description,
-         COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name
-       FROM parts p
-       LEFT JOIN users u ON u.id = p.user_id
-       WHERE p.role = 'vendor'
-       ORDER BY p.created_at DESC
-       LIMIT 6`
-    );
-    offerRows = partRowsResult.rows.map((row) => ({
-      ...row,
-      price_ngn: null,
-      stock_qty: null,
-    }));
-  }
-
-  const fallbackNames = [
-    "QuickFix Spares",
-    "AutoHub Central",
-    "PrimeParts Depot",
-    "RoadReady Parts",
-    "Zenith Auto Supply",
-    "Metro Spares",
-  ];
-
-  const offers = offerRows.slice(0, 5).map((part, index) => {
-    const base = typeof part.price_ngn === "number" ? part.price_ngn : 35000 + index * 7000;
-    const urgencyBonus = requestRow.urgency === "urgent" ? 3000 : 0;
-    return {
-      id: `off_${requestId}_${index + 1}`,
-      requestId,
-      partId: part.id,
-      vendor:
-        (typeof part.vendor_name === "string" && part.vendor_name.trim()) ||
-        fallbackNames[index] ||
-        `Vendor ${index + 1}`,
-      itemName: part.name,
-      notes: part.description ?? requestRow.part_description ?? "",
-      eta: `${35 + index * 20} mins`,
-      total: base + urgencyBonus,
-      currency: "NGN",
-      stockQty: part.stock_qty,
-    };
-  });
+    part_name: string | null;
+    stock_qty: number | null;
+    image_url: string | null;
+  }>(
+    `SELECT
+       q.id,
+       q.request_id,
+       q.vendor_user_id,
+       q.part_id,
+       q.price_ngn,
+       q.eta_minutes,
+       q.note,
+       q.status,
+       q.counter_price_ngn,
+       q.counter_note,
+       q.countered_by,
+       q.created_at,
+       q.updated_at,
+       COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name,
+       p.name AS part_name,
+       p.stock_qty,
+       p.image_url
+     FROM part_request_quotes q
+     LEFT JOIN users u ON u.id = q.vendor_user_id
+     LEFT JOIN parts p ON p.id = q.part_id
+     WHERE q.request_id = $1
+     ORDER BY
+       CASE WHEN q.status = 'accepted' THEN 0 ELSE 1 END,
+       q.price_ngn ASC,
+       q.created_at DESC`,
+    [requestId],
+  );
 
   return res.json({
     ok: true,
     request: {
       id: requestRow.id,
+      userId: requestRow.user_id,
       vehicle: requestRow.vehicle,
       partDescription: requestRow.part_description,
       urgency: requestRow.urgency,
+      status: requestRow.status,
+      createdAt: requestRow.created_at,
     },
-    offers,
+    offers: quotesResult.rows.map((quote) => ({
+      id: quote.id,
+      requestId: quote.request_id,
+      partId: quote.part_id,
+      vendorUserId: quote.vendor_user_id,
+      vendor:
+        (typeof quote.vendor_name === "string" && quote.vendor_name.trim()) ||
+        "Vendor",
+      itemName:
+        (typeof quote.part_name === "string" && quote.part_name.trim()) ||
+        requestRow.part_description ||
+        "Requested part",
+      notes: quote.note ?? "",
+      eta:
+        typeof quote.eta_minutes === "number" && quote.eta_minutes > 0
+          ? `${quote.eta_minutes} mins`
+          : "ETA unavailable",
+      etaMinutes: quote.eta_minutes,
+      total: quote.price_ngn,
+      currency: "NGN",
+      stockQty: quote.stock_qty,
+      imageUrl: quote.image_url,
+      status: quote.status,
+      counterPriceNgn: quote.counter_price_ngn,
+      counterNote: quote.counter_note,
+      counteredBy: quote.countered_by,
+      createdAt: quote.created_at,
+      updatedAt: quote.updated_at,
+    })),
   });
 });
 
