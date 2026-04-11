@@ -76,6 +76,7 @@ router.post("/signup", async (req: Request, res: Response) => {
     email?: string;
     password?: string;
     firstName?: string;
+    lastName?: string;
     fullName?: string;
   };
 
@@ -99,6 +100,12 @@ router.post("/signup", async (req: Request, res: Response) => {
   }
   const normalizedFirstName =
     normalizeFirstName(firstName) ?? normalizeFirstName(fullName);
+  const normalizedLastName =
+    typeof req.body?.lastName === "string" && req.body.lastName.trim()
+      ? req.body.lastName.trim()
+      : typeof fullName === "string" && fullName.trim().includes(" ")
+        ? fullName.trim().replace(/^\S+\s+/, "").trim() || null
+        : null;
   const passwordError = validatePassword(password);
   if (passwordError) {
     return res.status(400).json({ ok: false, message: passwordError });
@@ -119,8 +126,15 @@ router.post("/signup", async (req: Request, res: Response) => {
     const passwordHash = await hashPassword(password);
     try {
       await query(
-        "INSERT INTO users (id, first_name, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, $5, FALSE)",
-        [userId, normalizedFirstName, normalizedEmail, passwordHash, normalizedRole]
+        "INSERT INTO users (id, first_name, last_name, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, $5, $6, FALSE)",
+        [
+          userId,
+          normalizedFirstName,
+          normalizedLastName,
+          normalizedEmail,
+          passwordHash,
+          normalizedRole,
+        ]
       );
     } catch (err) {
       if (!isDbColumnError(err)) throw err;
