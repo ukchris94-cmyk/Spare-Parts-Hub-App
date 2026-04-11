@@ -494,6 +494,57 @@ router.get("/profile", async (req: Request, res: Response) => {
   }
 });
 
+router.patch("/profile", async (req: Request, res: Response) => {
+  const requestedUserId =
+    typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
+  const firstName =
+    typeof req.body?.firstName === "string" ? req.body.firstName.trim() : "";
+  const lastName =
+    typeof req.body?.lastName === "string" ? req.body.lastName.trim() : "";
+
+  if (!requestedUserId) {
+    return res.status(400).json({ ok: false, message: "userId is required" });
+  }
+
+  if (!firstName) {
+    return res.status(400).json({ ok: false, message: "firstName is required" });
+  }
+
+  try {
+    const userId = await resolveUserId(requestedUserId);
+    if (!userId) {
+      return res.status(404).json({ ok: false, message: "User not found" });
+    }
+
+    const result = await query<UserRow>(
+      `UPDATE users
+       SET first_name = $1, last_name = $2
+       WHERE id = $3
+       RETURNING id, first_name, last_name, email, role`,
+      [firstName, lastName || null, userId],
+    );
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(404).json({ ok: false, message: "User not found" });
+    }
+
+    return res.json({
+      ok: true,
+      profile: {
+        id: user.id,
+        firstName: user.first_name ?? "",
+        lastName: user.last_name ?? "",
+        email: user.email,
+        role: user.role,
+      },
+    });
+  } catch (err) {
+    req.log.error({ err, requestedUserId }, "Profile update failed");
+    return res.status(500).json({ ok: false, message: "Could not update profile" });
+  }
+});
+
 router.delete("/user/vehicles/:vehicleId", async (req: Request, res: Response) => {
   const { vehicleId } = req.params;
   const requestedUserId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
