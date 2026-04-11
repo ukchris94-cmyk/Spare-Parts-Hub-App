@@ -467,6 +467,7 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
     description: string | null;
     price_ngn: number | null;
     stock_qty: number | null;
+    vendor_name: string | null;
   }> = [];
   try {
     const partRowsResult = await query<{
@@ -475,11 +476,19 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
       description: string | null;
       price_ngn: number | null;
       stock_qty: number | null;
+      vendor_name: string | null;
     }>(
-      `SELECT id, name, description, price_ngn, stock_qty
-       FROM parts
-       WHERE role = 'vendor'
-       ORDER BY created_at DESC
+      `SELECT
+         p.id,
+         p.name,
+         p.description,
+         p.price_ngn,
+         p.stock_qty,
+         COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name
+       FROM parts p
+       LEFT JOIN users u ON u.id = p.user_id
+       WHERE p.role = 'vendor'
+       ORDER BY p.created_at DESC
        LIMIT 6`
     );
     offerRows = partRowsResult.rows;
@@ -489,11 +498,17 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
       id: string;
       name: string;
       description: string | null;
+      vendor_name: string | null;
     }>(
-      `SELECT id, name, description
-       FROM parts
-       WHERE role = 'vendor'
-       ORDER BY created_at DESC
+      `SELECT
+         p.id,
+         p.name,
+         p.description,
+         COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name
+       FROM parts p
+       LEFT JOIN users u ON u.id = p.user_id
+       WHERE p.role = 'vendor'
+       ORDER BY p.created_at DESC
        LIMIT 6`
     );
     offerRows = partRowsResult.rows.map((row) => ({
@@ -519,7 +534,10 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
       id: `off_${requestId}_${index + 1}`,
       requestId,
       partId: part.id,
-      vendor: fallbackNames[index] ?? `Vendor ${index + 1}`,
+      vendor:
+        (typeof part.vendor_name === "string" && part.vendor_name.trim()) ||
+        fallbackNames[index] ||
+        `Vendor ${index + 1}`,
       itemName: part.name,
       notes: part.description ?? requestRow.part_description ?? "",
       eta: `${35 + index * 20} mins`,

@@ -169,6 +169,81 @@ router.get("/user/:userId", async (req: Request, res: Response) => {
   });
 });
 
+router.get("/vendor/:userId", async (req: Request, res: Response) => {
+  const { userId } = req.params;
+
+  const vendorPartsResult = await query<{ id: string }>(
+    `SELECT id
+     FROM parts
+     WHERE user_id = $1`,
+    [userId],
+  );
+  const vendorPartIds = new Set(vendorPartsResult.rows.map((row) => row.id));
+
+  if (vendorPartIds.size === 0) {
+    return res.json({ ok: true, orders: [] });
+  }
+
+  const { rows } = await query<{
+    id: string;
+    user_id: string;
+    status: string;
+    created_at: string;
+    items: unknown;
+    buyer_name: string | null;
+  }>(
+    `SELECT
+       o.id,
+       o.user_id,
+       o.status,
+       o.created_at,
+       o.items,
+       COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS buyer_name
+     FROM orders o
+     LEFT JOIN users u ON u.id = o.user_id
+     ORDER BY o.created_at DESC`,
+  );
+
+  const orders = rows
+    .map((order) => {
+      const items = Array.isArray(order.items) ? order.items : [];
+      const matchedItems = items.filter((item: any) => {
+        const partId =
+          typeof item?.partId === "string" && item.partId.trim()
+            ? item.partId.trim()
+            : "";
+        return vendorPartIds.has(partId);
+      });
+
+      if (matchedItems.length === 0) {
+        return null;
+      }
+
+      return {
+        id: order.id,
+        userId: order.user_id,
+        buyerName: order.buyer_name,
+        status: order.status,
+        createdAt: order.created_at,
+        items: matchedItems,
+      };
+    })
+    .filter(
+      (
+        order,
+      ): order is {
+        id: string;
+        userId: string;
+        buyerName: string | null;
+        status: string;
+        createdAt: string;
+        items: unknown[];
+      } => order !== null,
+    );
+
+  return res.json({ ok: true, orders });
+});
+
 router.get("/pending", async (req: Request, res: Response) => {
   const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 20;
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 20;
