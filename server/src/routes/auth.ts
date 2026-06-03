@@ -3,6 +3,7 @@ import nodemailer from "nodemailer";
 import { createHash, randomBytes, scrypt, timingSafeEqual } from "crypto";
 import { promisify } from "util";
 import { query } from "../db";
+import { createAuthToken } from "../middleware/auth";
 
 const router = Router();
 const scryptAsync = promisify(scrypt);
@@ -285,8 +286,7 @@ router.post("/login", async (req: Request, res: Response) => {
     });
   }
 
-  const tokenPayload = `${user.id}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
-  const token = Buffer.from(tokenPayload).toString("base64url");
+  const token = createAuthToken(user.id);
   log.info({ userId: user.id, email: user.email }, "Login success");
 
   return res.json({

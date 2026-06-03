@@ -111,3 +111,22 @@ ALTER TABLE parts ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON 
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS price_ngn INTEGER;
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS stock_qty INTEGER;
 CREATE INDEX IF NOT EXISTS idx_parts_user ON parts (user_id);
+
+CREATE TABLE IF NOT EXISTS onboarding_images (
+  id            TEXT PRIMARY KEY,
+  original_name TEXT NOT NULL,
+  stored_name   TEXT NOT NULL,
+  mime_type     TEXT NOT NULL,
+  size          INTEGER NOT NULL,
+  storage_path  TEXT NOT NULL,
+  access_url    TEXT NOT NULL,
+  uploaded_by   TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_onboarding_images_created_at
+  ON onboarding_images (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_onboarding_images_uploaded_by
+  ON onboarding_images (uploaded_by);

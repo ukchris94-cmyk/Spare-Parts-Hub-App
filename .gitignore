@@ -6,6 +6,7 @@ yarn-error.log*
 pnpm-debug.log*
 dist/
 build/
+server/uploads/
 .DS_Store
 
 # Env & secrets
@@ -21,4 +22,3 @@ mobile/web-build/
 
 # TypeScript
 *.tsbuildinfo
-

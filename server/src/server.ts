@@ -9,6 +9,7 @@ import partsRouter from "./routes/parts";
 import ordersRouter from "./routes/orders";
 import usersRouter from "./routes/users";
 import homeRouter from "./routes/home";
+import adminRouter from "./routes/admin";
 
 dotenv.config();
 
@@ -29,7 +30,7 @@ app.use(
   })
 );
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "30mb" }));
 
 app.get("/health", async (_req, res) => {
   try {
@@ -61,6 +62,8 @@ app.use("/users", usersRouter);
 app.use("/api/users", usersRouter);
 app.use("/home", homeRouter);
 app.use("/api/home", homeRouter);
+app.use("/admin", adminRouter);
+app.use("/api/admin", adminRouter);
 // Compatibility mounts for clients that already include `/home` in API_URL
 // and then append feature paths like `/home/profile` or `/orders/user/:id`.
 app.use("/home/home", homeRouter);
