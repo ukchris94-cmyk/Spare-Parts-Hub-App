@@ -130,3 +130,22 @@ CREATE INDEX IF NOT EXISTS idx_onboarding_images_created_at
 
 CREATE INDEX IF NOT EXISTS idx_onboarding_images_uploaded_by
   ON onboarding_images (uploaded_by);
+
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id                TEXT PRIMARY KEY,
+  recipient_user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+  recipient_role    TEXT NOT NULL,
+  type              TEXT NOT NULL,
+  title             TEXT NOT NULL,
+  message           TEXT NOT NULL,
+  related_order_id  TEXT REFERENCES orders(id) ON DELETE CASCADE,
+  related_job_id    TEXT,
+  read              BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_read
+  ON notifications (recipient_user_id, read, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_role_read
+  ON notifications (recipient_role, read, created_at DESC);

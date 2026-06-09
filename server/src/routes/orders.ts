@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { query } from "../db";
+import { createNotification, notifyRole } from "../services/notifications";
 
 const router = Router();
 
@@ -20,6 +21,14 @@ type OrderStatus = (typeof ORDER_STATUSES)[number];
 
 function isValidStatus(value: string): value is OrderStatus {
   return ORDER_STATUSES.includes(value as OrderStatus);
+}
+
+async function safeNotify(log: Request["log"], task: () => Promise<void>): Promise<void> {
+  try {
+    await task();
+  } catch (err) {
+    log.warn({ err }, "Notification write failed");
+  }
 }
 
 function buildTrackingSteps(status: string) {
@@ -99,6 +108,66 @@ router.post("/", async (req: Request, res: Response) => {
         [firstRequestId],
       );
     }
+    const partIds = Array.isArray(items)
+      ? Array.from(
+          new Set(
+            items
+              .map((item: any) =>
+                typeof item?.partId === "string" && item.partId.trim()
+                  ? item.partId.trim()
+                  : null,
+              )
+              .filter((partId: string | null): partId is string => partId !== null),
+          ),
+        )
+      : [];
+
+    await safeNotify(log, async () => {
+      if (partIds.length > 0) {
+        const { rows: vendorRows } = await query<{ user_id: string | null }>(
+          "SELECT DISTINCT user_id FROM parts WHERE id = ANY($1::text[]) AND user_id IS NOT NULL",
+          [partIds],
+        );
+        await Promise.all(
+          vendorRows
+            .filter((row): row is { user_id: string } => typeof row.user_id === "string")
+            .map((row) =>
+              createNotification({
+                recipientUserId: row.user_id,
+                recipientRole: "vendor",
+                type: "new_order",
+                title: "New order received",
+                message: "A customer placed an order containing one of your parts.",
+                relatedOrderId: id,
+              }),
+            ),
+        );
+      }
+
+      await Promise.all([
+        notifyRole("dispatcher", {
+          type: "order_coordination",
+          title: "New order needs coordination",
+          message: "A new order is pending and may need pickup or delivery coordination.",
+          relatedOrderId: id,
+        }),
+        notifyRole("admin", {
+          type: "system_order_activity",
+          title: "New order created",
+          message: "A new customer order was created.",
+          relatedOrderId: id,
+        }),
+        createNotification({
+          recipientUserId: userId,
+          recipientRole: "user",
+          type: "order_created",
+          title: "Order placed",
+          message: "Your order was submitted and is pending confirmation.",
+          relatedOrderId: id,
+        }),
+      ]);
+    });
+
     log.info({ orderId: id, userId }, "Order created");
     return res.status(201).json({
       id,
@@ -351,6 +420,25 @@ router.patch("/:orderId/status", async (req: Request, res: Response) => {
     return res.status(404).json({ ok: false, message: "Order not found" });
   }
 
+  await safeNotify(log, async () => {
+    await Promise.all([
+      createNotification({
+        recipientUserId: order.user_id,
+        recipientRole: "user",
+        type: "order_status_changed",
+        title: "Order status updated",
+        message: `Your order is now ${statusRaw.replace(/_/g, " ")}.`,
+        relatedOrderId: order.id,
+      }),
+      notifyRole("admin", {
+        type: "system_order_activity",
+        title: "Order status changed",
+        message: `Order ${order.id} changed to ${statusRaw.replace(/_/g, " ")}.`,
+        relatedOrderId: order.id,
+      }),
+    ]);
+  });
+
   log.info({ orderId, status: statusRaw }, "Order status updated");
   return res.json({
     ok: true,
@@ -385,6 +473,17 @@ router.post("/:orderId/accept-delivery", async (req: Request, res: Response) => 
   if (!order) {
     return res.status(404).json({ ok: false, message: "Order not found" });
   }
+
+  await safeNotify(req.log, async () => {
+    await createNotification({
+      recipientUserId: order.user_id,
+      recipientRole: "user",
+      type: "order_status_changed",
+      title: "Order is in transit",
+      message: "A dispatcher accepted delivery for your order.",
+      relatedOrderId: order.id,
+    });
+  });
 
   return res.json({
     ok: true,

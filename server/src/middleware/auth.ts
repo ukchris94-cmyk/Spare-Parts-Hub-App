@@ -83,3 +83,29 @@ export function requireRoles(...allowedRoles: string[]) {
     return next();
   };
 }
+
+
+export async function requireAuthenticated(req: Request, res: Response, next: NextFunction) {
+  const header = req.header("authorization") || "";
+  const match = header.match(/^Bearers+(.+)$/i);
+  if (!match) {
+    return res.status(401).json({ ok: false, message: "Authentication required" });
+  }
+
+  const payload = verifyAuthToken(match[1]);
+  if (!payload) {
+    return res.status(401).json({ ok: false, message: "Invalid authentication token" });
+  }
+
+  const { rows } = await query<{ id: string; role: string }>(
+    "SELECT id, role FROM users WHERE id = $1 LIMIT 1",
+    [payload.sub]
+  );
+  const user = rows[0];
+  if (!user) {
+    return res.status(401).json({ ok: false, message: "Invalid authentication token" });
+  }
+
+  req.user = { id: user.id, role: user.role };
+  return next();
+}

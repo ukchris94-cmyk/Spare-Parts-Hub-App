@@ -10,6 +10,7 @@ import ordersRouter from "./routes/orders";
 import usersRouter from "./routes/users";
 import homeRouter from "./routes/home";
 import adminRouter from "./routes/admin";
+import notificationsRouter from "./routes/notifications";
 
 dotenv.config();
 
@@ -64,6 +65,8 @@ app.use("/home", homeRouter);
 app.use("/api/home", homeRouter);
 app.use("/admin", adminRouter);
 app.use("/api/admin", adminRouter);
+app.use("/notifications", notificationsRouter);
+app.use("/api/notifications", notificationsRouter);
 // Compatibility mounts for clients that already include `/home` in API_URL
 // and then append feature paths like `/home/profile` or `/orders/user/:id`.
 app.use("/home/home", homeRouter);
