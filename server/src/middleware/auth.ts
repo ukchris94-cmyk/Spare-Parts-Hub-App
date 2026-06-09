@@ -87,7 +87,7 @@ export function requireRoles(...allowedRoles: string[]) {
 
 export async function requireAuthenticated(req: Request, res: Response, next: NextFunction) {
   const header = req.header("authorization") || "";
-  const match = header.match(/^Bearers+(.+)$/i);
+  const match = header.match(/^Bearer\s+(.+)$/i);
   if (!match) {
     return res.status(401).json({ ok: false, message: "Authentication required" });
   }

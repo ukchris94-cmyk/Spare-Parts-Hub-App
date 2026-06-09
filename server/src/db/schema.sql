@@ -131,6 +131,13 @@ CREATE INDEX IF NOT EXISTS idx_onboarding_images_created_at
 CREATE INDEX IF NOT EXISTS idx_onboarding_images_uploaded_by
   ON onboarding_images (uploaded_by);
 
+ALTER TABLE onboarding_images ADD COLUMN IF NOT EXISTS vendor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE onboarding_images ADD COLUMN IF NOT EXISTS part_id TEXT REFERENCES parts(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_onboarding_images_vendor_user
+  ON onboarding_images (vendor_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_onboarding_images_part
+  ON onboarding_images (part_id);
+
 
 CREATE TABLE IF NOT EXISTS notifications (
   id                TEXT PRIMARY KEY,
