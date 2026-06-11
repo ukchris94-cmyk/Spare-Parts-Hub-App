@@ -104,7 +104,10 @@ async function main() {
     return;
   }
 
-  if (!prefix || !/^[^\s@]+\.[^\s@]+$/.test(`test@${domain}`)) {
+  console.log({ prefix, domain, sampleEmail: `${prefix}.user@${domain}`, argv: process.argv });
+
+  const sampleEmail = `${prefix}.user@${domain}`;
+  if (!prefix || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(sampleEmail)) {
     printUsage();
     console.error("Invalid prefix or domain.");
     process.exitCode = 1;
