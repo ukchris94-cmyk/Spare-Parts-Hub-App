@@ -9,7 +9,8 @@
     "start": "node dist/server.js",
     "migrate": "ts-node -r dotenv/config src/db/migrate.ts",
     "promote-admin": "ts-node -r dotenv/config src/scripts/promote-admin.ts",
-    "create-admin": "ts-node -r dotenv/config src/scripts/create-admin.ts"
+    "create-admin": "ts-node -r dotenv/config src/scripts/create-admin.ts",
+    "create-test-users": "ts-node -r dotenv/config src/scripts/create-test-users.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
