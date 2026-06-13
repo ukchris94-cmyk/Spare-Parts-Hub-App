@@ -12,13 +12,14 @@ type NotificationInput = {
   message: string;
   relatedOrderId?: string | null;
   relatedJobId?: string | null;
+  relatedBargainOfferId?: string | null;
 };
 
 export async function createNotification(input: NotificationInput): Promise<void> {
   await query(
     `INSERT INTO notifications
-       (id, recipient_user_id, recipient_role, type, title, message, related_order_id, related_job_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+       (id, recipient_user_id, recipient_role, type, title, message, related_order_id, related_job_id, related_bargain_offer_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
     [
       genId("ntf"),
       input.recipientUserId ?? null,
@@ -28,6 +29,7 @@ export async function createNotification(input: NotificationInput): Promise<void
       input.message,
       input.relatedOrderId ?? null,
       input.relatedJobId ?? null,
+      input.relatedBargainOfferId ?? null,
     ],
   );
 }

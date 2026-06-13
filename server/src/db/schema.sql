@@ -139,6 +139,26 @@ CREATE INDEX IF NOT EXISTS idx_onboarding_images_part
   ON onboarding_images (part_id);
 
 
+CREATE TABLE IF NOT EXISTS bargain_offers (
+  id              TEXT PRIMARY KEY,
+  part_id         TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+  vendor_user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  buyer_user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  offer_price_ngn INTEGER NOT NULL,
+  note            TEXT,
+  vendor_reply    TEXT,
+  status          TEXT NOT NULL DEFAULT 'open',
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bargain_offers_vendor
+  ON bargain_offers (vendor_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bargain_offers_buyer
+  ON bargain_offers (buyer_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bargain_offers_part
+  ON bargain_offers (part_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS notifications (
   id                TEXT PRIMARY KEY,
   recipient_user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
@@ -152,7 +172,11 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS related_bargain_offer_id TEXT REFERENCES bargain_offers(id) ON DELETE SET NULL;
+
 CREATE INDEX IF NOT EXISTS idx_notifications_user_read
   ON notifications (recipient_user_id, read, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_role_read
   ON notifications (recipient_role, read, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_bargain_offer
+  ON notifications (related_bargain_offer_id);

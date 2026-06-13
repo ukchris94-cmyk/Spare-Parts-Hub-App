@@ -22,11 +22,12 @@ router.get("/", async (req: Request, res: Response) => {
     message: string;
     related_order_id: string | null;
     related_job_id: string | null;
+    related_bargain_offer_id: string | null;
     read: boolean;
     created_at: string;
   }>(
     `SELECT id, recipient_user_id, recipient_role, type, title, message,
-            related_order_id, related_job_id, read, created_at
+            related_order_id, related_job_id, related_bargain_offer_id, read, created_at
      FROM notifications
      WHERE recipient_user_id = $1 OR (recipient_user_id IS NULL AND recipient_role = $2)
      ORDER BY created_at DESC
@@ -45,6 +46,7 @@ router.get("/", async (req: Request, res: Response) => {
       message: row.message,
       relatedOrderId: row.related_order_id,
       relatedJobId: row.related_job_id,
+      relatedBargainOfferId: row.related_bargain_offer_id,
       read: row.read,
       createdAt: row.created_at,
     })),

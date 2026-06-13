@@ -36,6 +36,74 @@ async function safeNotify(log: Request["log"], task: () => Promise<void>): Promi
   }
 }
 
+type BargainOfferRow = {
+  id: string;
+  part_id: string;
+  vendor_user_id: string;
+  buyer_user_id: string;
+  offer_price_ngn: number;
+  note: string | null;
+  vendor_reply: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  part_name: string;
+  current_price_ngn: number | null;
+  buyer_name: string | null;
+  vendor_name: string | null;
+};
+
+function mapBargainOffer(row: BargainOfferRow) {
+  return {
+    id: row.id,
+    partId: row.part_id,
+    partName: row.part_name,
+    vendorUserId: row.vendor_user_id,
+    buyerUserId: row.buyer_user_id,
+    buyerName: row.buyer_name,
+    vendorName: row.vendor_name,
+    offerPriceNgn: row.offer_price_ngn,
+    currentPriceNgn: row.current_price_ngn,
+    note: row.note,
+    vendorReply: row.vendor_reply,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function loadBargainOffer(offerId: string) {
+  const { rows } = await query<BargainOfferRow>(
+    `SELECT
+       bo.id,
+       bo.part_id,
+       bo.vendor_user_id,
+       bo.buyer_user_id,
+       bo.offer_price_ngn,
+       bo.note,
+       bo.vendor_reply,
+       bo.status,
+       bo.created_at,
+       bo.updated_at,
+       p.name AS part_name,
+       p.price_ngn AS current_price_ngn,
+       COALESCE(NULLIF(b.first_name, ''), split_part(b.email, '@', 1)) AS buyer_name,
+       COALESCE(NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name
+     FROM bargain_offers bo
+     JOIN parts p ON p.id = bo.part_id
+     LEFT JOIN users b ON b.id = bo.buyer_user_id
+     LEFT JOIN users v ON v.id = bo.vendor_user_id
+     WHERE bo.id = $1
+     LIMIT 1`,
+    [offerId],
+  );
+  return rows[0] ?? null;
+}
+
+function canViewBargainOffer(row: BargainOfferRow, userId: string): boolean {
+  return row.vendor_user_id === userId || row.buyer_user_id === userId;
+}
+
 router.get("/search", async (req: Request, res: Response) => {
   const { query: q, role, category, userId } = req.query as {
     query?: string;
@@ -303,21 +371,49 @@ router.post("/:partId/bargain", async (req: Request, res: Response) => {
       : "";
   const noteText = normalizedNote ? ` Note: ${normalizedNote}` : "";
 
+  const offerId = genId("bgo");
+
   try {
+    await query(
+      `INSERT INTO bargain_offers
+         (id, part_id, vendor_user_id, buyer_user_id, offer_price_ngn, note, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'open')`,
+      [
+        offerId,
+        part.id,
+        part.user_id,
+        normalizedBuyerUserId,
+        normalizedOfferPriceNgn,
+        normalizedNote || null,
+      ],
+    );
+
     await createNotification({
       recipientUserId: part.user_id,
       recipientRole: "vendor",
       type: "part_bargain_offer",
       title: "New bargain offer",
       message: `${buyerName} offered ${formattedOffer} for "${part.name}".${currentPrice}${noteText}`,
+      relatedBargainOfferId: offerId,
     });
   } catch (err) {
-    log.error({ err, partId, buyerUserId: normalizedBuyerUserId }, "Bargain notification failed");
+    log.error({ err, partId, buyerUserId: normalizedBuyerUserId }, "Bargain offer create failed");
     return res.status(500).json({ ok: false, message: "Could not send bargain offer." });
   }
 
-  log.info({ partId, buyerUserId: normalizedBuyerUserId, vendorUserId: part.user_id }, "Bargain offer sent");
-  return res.status(201).json({ ok: true, message: "Bargain offer sent to vendor." });
+  log.info({ offerId, partId, buyerUserId: normalizedBuyerUserId, vendorUserId: part.user_id }, "Bargain offer sent");
+  return res.status(201).json({
+    ok: true,
+    message: "Bargain offer sent to vendor.",
+    offer: {
+      id: offerId,
+      partId: part.id,
+      vendorUserId: part.user_id,
+      buyerUserId: normalizedBuyerUserId,
+      offerPriceNgn: normalizedOfferPriceNgn,
+      status: "open",
+    },
+  });
 });
 
 router.patch("/:partId", async (req: Request, res: Response) => {
@@ -999,6 +1095,108 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
       updatedAt: quote.updated_at,
     })),
   });
+});
+
+router.get("/bargain-offers/:offerId", async (req: Request, res: Response) => {
+  const { offerId } = req.params;
+  const userId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+
+  if (!userId) {
+    return res.status(400).json({ ok: false, message: "userId is required" });
+  }
+
+  const offer = await loadBargainOffer(offerId);
+  if (!offer) {
+    return res.status(404).json({ ok: false, message: "Bargain offer not found" });
+  }
+  if (!canViewBargainOffer(offer, userId)) {
+    return res.status(403).json({ ok: false, message: "Not allowed to view this bargain offer" });
+  }
+
+  return res.json({ ok: true, offer: mapBargainOffer(offer) });
+});
+
+router.patch("/bargain-offers/:offerId", async (req: Request, res: Response) => {
+  const { offerId } = req.params;
+  const log = req.log;
+  const { userId, action, vendorReply } = req.body as {
+    userId?: string;
+    action?: string;
+    vendorReply?: string;
+  };
+
+  const normalizedUserId = typeof userId === "string" ? userId.trim() : "";
+  const normalizedAction = typeof action === "string" ? action.trim().toLowerCase() : "";
+  const normalizedReply = typeof vendorReply === "string" ? vendorReply.trim().slice(0, 1000) : "";
+
+  if (!normalizedUserId) {
+    return res.status(400).json({ ok: false, message: "userId is required" });
+  }
+  if (normalizedAction && !["accept", "reject"].includes(normalizedAction)) {
+    return res.status(400).json({ ok: false, message: "Invalid bargain action" });
+  }
+  if (!normalizedAction && !normalizedReply) {
+    return res.status(400).json({ ok: false, message: "Add a reply or choose accept/reject" });
+  }
+
+  const current = await loadBargainOffer(offerId);
+  if (!current) {
+    return res.status(404).json({ ok: false, message: "Bargain offer not found" });
+  }
+  if (current.vendor_user_id !== normalizedUserId) {
+    return res.status(403).json({ ok: false, message: "Only the vendor can respond to this bargain offer" });
+  }
+
+  const nextStatus =
+    normalizedAction === "accept" ? "accepted" : normalizedAction === "reject" ? "rejected" : null;
+
+  const { rows } = await query<BargainOfferRow>(
+    `UPDATE bargain_offers
+     SET status = COALESCE($1, status),
+         vendor_reply = COALESCE($2, vendor_reply),
+         updated_at = NOW()
+     WHERE id = $3
+     RETURNING
+       id,
+       part_id,
+       vendor_user_id,
+       buyer_user_id,
+       offer_price_ngn,
+       note,
+       vendor_reply,
+       status,
+       created_at,
+       updated_at,
+       (SELECT name FROM parts WHERE parts.id = bargain_offers.part_id) AS part_name,
+       (SELECT price_ngn FROM parts WHERE parts.id = bargain_offers.part_id) AS current_price_ngn,
+       (SELECT COALESCE(NULLIF(first_name, ''), split_part(email, '@', 1)) FROM users WHERE users.id = bargain_offers.buyer_user_id) AS buyer_name,
+       (SELECT COALESCE(NULLIF(first_name, ''), split_part(email, '@', 1)) FROM users WHERE users.id = bargain_offers.vendor_user_id) AS vendor_name`,
+    [nextStatus, normalizedReply || null, offerId],
+  );
+  const updated = rows[0];
+
+  if (!updated) {
+    return res.status(404).json({ ok: false, message: "Bargain offer not found" });
+  }
+
+  const statusText = nextStatus
+    ? nextStatus === "accepted"
+      ? "accepted your offer"
+      : "rejected your offer"
+    : "replied to your offer";
+  await safeNotify(log, async () => {
+    await createNotification({
+      recipientUserId: updated.buyer_user_id,
+      recipientRole: "user",
+      type: "part_bargain_response",
+      title: "Bargain offer update",
+      message: `${updated.vendor_name || "The vendor"} ${statusText} for "${updated.part_name}".${normalizedReply ? ` Message: ${normalizedReply}` : ""}`,
+      relatedBargainOfferId: updated.id,
+    });
+  });
+
+  log.info({ offerId, action: normalizedAction || "reply" }, "Bargain offer updated");
+  return res.json({ ok: true, offer: mapBargainOffer(updated) });
 });
 
 router.get("/:partId", async (req: Request, res: Response) => {
