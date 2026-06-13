@@ -31,7 +31,7 @@ app.use(
   })
 );
 app.use(cors());
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "30mb" }));
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "50mb" }));
 
 app.get("/health", async (_req, res) => {
   try {

@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { query } from "../db";
+import { createNotification } from "../services/notifications";
 
 const router = Router();
 
@@ -25,6 +26,14 @@ function toNullableInt(value: unknown): number | null {
     if (Number.isFinite(parsed)) return parsed;
   }
   return null;
+}
+
+async function safeNotify(log: Request["log"], task: () => Promise<void>): Promise<void> {
+  try {
+    await task();
+  } catch (err) {
+    log.warn({ err }, "Notification write failed");
+  }
 }
 
 router.get("/search", async (req: Request, res: Response) => {
@@ -206,7 +215,19 @@ router.post("/", async (req: Request, res: Response) => {
         [id, normalizedName, normalizedDescription || null, normalizedImageUrl, normalizedRole],
       );
     }
-    log.info({ id, role: normalizedRole }, "Part created");
+    await safeNotify(log, async () => {
+      if (normalizedRole !== "vendor" || !normalizedUserId) return;
+
+      await createNotification({
+        recipientUserId: normalizedUserId,
+        recipientRole: "vendor",
+        type: "part_added_to_vendor",
+        title: "New part added",
+        message: `${normalizedName} has been added to your vendor inventory.`,
+      });
+    });
+
+    log.info({ id, role: normalizedRole, userId: normalizedUserId }, "Part created");
     return res.status(201).json({
       ok: true,
       id,
@@ -222,6 +243,81 @@ router.post("/", async (req: Request, res: Response) => {
     log.error({ err, name: normalizedName }, "Part create failed");
     throw err;
   }
+});
+
+router.post("/:partId/bargain", async (req: Request, res: Response) => {
+  const { partId } = req.params;
+  const log = req.log;
+  const { buyerUserId, offerPriceNgn, note } = req.body as {
+    buyerUserId?: string;
+    offerPriceNgn?: number | string;
+    note?: string;
+  };
+
+  const normalizedBuyerUserId =
+    typeof buyerUserId === "string" && buyerUserId.trim() ? buyerUserId.trim() : "";
+  const normalizedOfferPriceNgn = toNullableInt(offerPriceNgn);
+  const normalizedNote = typeof note === "string" ? note.trim().slice(0, 500) : "";
+
+  if (!normalizedBuyerUserId) {
+    return res.status(400).json({ ok: false, message: "Sign in before sending a bargain offer." });
+  }
+  if (!normalizedOfferPriceNgn || normalizedOfferPriceNgn <= 0) {
+    return res.status(400).json({ ok: false, message: "Enter a valid offer amount." });
+  }
+
+  const partResult = await query<{
+    id: string;
+    name: string;
+    user_id: string | null;
+    role: string | null;
+    price_ngn: number | null;
+  }>(
+    `SELECT id, name, user_id, role, price_ngn
+     FROM parts
+     WHERE id = $1
+     LIMIT 1`,
+    [partId],
+  );
+  const part = partResult.rows[0];
+
+  if (!part) {
+    return res.status(404).json({ ok: false, message: "Part not found." });
+  }
+  if (part.role !== "vendor" || !part.user_id) {
+    return res.status(400).json({ ok: false, message: "This part is not linked to a vendor account." });
+  }
+
+  const buyerResult = await query<{ display_name: string | null }>(
+    `SELECT COALESCE(NULLIF(first_name, ''), split_part(email, '@', 1)) AS display_name
+     FROM users
+     WHERE id = $1
+     LIMIT 1`,
+    [normalizedBuyerUserId],
+  );
+  const buyerName = buyerResult.rows[0]?.display_name || "A buyer";
+  const formattedOffer = `₦${normalizedOfferPriceNgn.toLocaleString()}`;
+  const currentPrice =
+    typeof part.price_ngn === "number" && part.price_ngn > 0
+      ? ` Current listing price is ₦${part.price_ngn.toLocaleString()}.`
+      : "";
+  const noteText = normalizedNote ? ` Note: ${normalizedNote}` : "";
+
+  try {
+    await createNotification({
+      recipientUserId: part.user_id,
+      recipientRole: "vendor",
+      type: "part_bargain_offer",
+      title: "New bargain offer",
+      message: `${buyerName} offered ${formattedOffer} for "${part.name}".${currentPrice}${noteText}`,
+    });
+  } catch (err) {
+    log.error({ err, partId, buyerUserId: normalizedBuyerUserId }, "Bargain notification failed");
+    return res.status(500).json({ ok: false, message: "Could not send bargain offer." });
+  }
+
+  log.info({ partId, buyerUserId: normalizedBuyerUserId, vendorUserId: part.user_id }, "Bargain offer sent");
+  return res.status(201).json({ ok: true, message: "Bargain offer sent to vendor." });
 });
 
 router.patch("/:partId", async (req: Request, res: Response) => {
