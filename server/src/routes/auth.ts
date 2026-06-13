@@ -61,6 +61,15 @@ function isDbColumnError(err: unknown): boolean {
   );
 }
 
+function isUniqueViolationError(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code?: string }).code === "23505"
+  );
+}
+
 function normalizeFirstName(value?: string): string | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -113,14 +122,18 @@ router.post("/signup", async (req: Request, res: Response) => {
   }
 
   try {
-    const existing = await query<{ id: string }>(
-      "SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1",
+    const existing = await query<{ id: string; verified: boolean }>(
+      "SELECT id, verified FROM users WHERE LOWER(email) = $1 LIMIT 1",
       [normalizedEmail]
     );
-    if (existing.rows.length > 0) {
+    const existingUser = existing.rows[0];
+    if (existingUser) {
       return res.status(409).json({
         ok: false,
-        message: "Account already exists. Please log in.",
+        code: existingUser.verified ? "ACCOUNT_EXISTS" : "ACCOUNT_UNVERIFIED",
+        message: existingUser.verified
+          ? "Account already exists. Please log in."
+          : "Account already exists but is not verified. Please log in and tap Verify now to resend a code.",
       });
     }
     const userId = genId("usr");
@@ -138,11 +151,29 @@ router.post("/signup", async (req: Request, res: Response) => {
         ]
       );
     } catch (err) {
+      if (isUniqueViolationError(err)) {
+        return res.status(409).json({
+          ok: false,
+          code: "ACCOUNT_EXISTS",
+          message: "Account already exists. Please log in.",
+        });
+      }
       if (!isDbColumnError(err)) throw err;
-      await query(
-        "INSERT INTO users (id, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, FALSE)",
-        [userId, normalizedEmail, passwordHash, normalizedRole]
-      );
+      try {
+        await query(
+          "INSERT INTO users (id, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, FALSE)",
+          [userId, normalizedEmail, passwordHash, normalizedRole]
+        );
+      } catch (legacyErr) {
+        if (isUniqueViolationError(legacyErr)) {
+          return res.status(409).json({
+            ok: false,
+            code: "ACCOUNT_EXISTS",
+            message: "Account already exists. Please log in.",
+          });
+        }
+        throw legacyErr;
+      }
     }
     log.info({ userId, email: normalizedEmail, role: normalizedRole }, "User created");
 
@@ -156,7 +187,7 @@ router.post("/signup", async (req: Request, res: Response) => {
 
     await transporter.sendMail({
       from: fromEmail,
-      to: email,
+      to: normalizedEmail,
       subject: "Your SpareParts Hub verification code",
       text: `Your verification code is ${code}. It expires in 10 minutes.`,
     });
@@ -188,11 +219,36 @@ router.post("/resend-code", async (req: Request, res: Response) => {
     return res.status(400).json({ ok: false, message: "Email is required" });
   }
 
-  const normalized = email.toLowerCase();
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  const normalized = email.toLowerCase().trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    return res.status(400).json({ ok: false, message: "Invalid email format" });
+  }
 
   try {
+    const { rows } = await query<{ id: string; verified: boolean; email: string }>(
+      "SELECT id, verified, email FROM users WHERE LOWER(email) = $1 LIMIT 1",
+      [normalized]
+    );
+    const user = rows[0];
+
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        code: "ACCOUNT_NOT_FOUND",
+        message: "No account found for this email. Please create an account first.",
+      });
+    }
+
+    if (user.verified) {
+      return res.status(409).json({
+        ok: false,
+        code: "ACCOUNT_ALREADY_VERIFIED",
+        message: "This account is already verified. Please log in.",
+      });
+    }
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     await query(
       `INSERT INTO verification_codes (email, code, expires_at) VALUES ($1, $2, $3)
        ON CONFLICT (email) DO UPDATE SET code = $2, expires_at = $3`,
@@ -200,11 +256,11 @@ router.post("/resend-code", async (req: Request, res: Response) => {
     );
     await transporter.sendMail({
       from: fromEmail,
-      to: email,
+      to: user.email,
       subject: "Your SpareParts Hub verification code",
       text: `Your new verification code is ${code}. It expires in 10 minutes.`,
     });
-    log.info({ email: normalized }, "Verification code resent");
+    log.info({ email: normalized, userId: user.id }, "Verification code resent");
   } catch (err) {
     log.error({ err, email: normalized }, "Resend verification email failed");
     return res.status(500).json({
@@ -215,9 +271,10 @@ router.post("/resend-code", async (req: Request, res: Response) => {
 
   return res.json({
     ok: true,
-    message: "Verification code resent (placeholder).",
+    message: "Verification code resent.",
   });
 });
+
 
 router.post("/login", async (req: Request, res: Response) => {
   const log = req.log;
@@ -444,7 +501,21 @@ async function handleVerifyEmail(req: Request, res: Response) {
       .json({ ok: false, message: "Email and code are required" });
   }
 
-  const normalized = email.toLowerCase();
+  const normalized = email.toLowerCase().trim();
+  const { rows: userRows } = await query<{ id: string; verified: boolean }>(
+    "SELECT id, verified FROM users WHERE LOWER(email) = $1 LIMIT 1",
+    [normalized]
+  );
+  const user = userRows[0];
+
+  if (!user) {
+    return res.status(404).json({ ok: false, message: "No account found for this email" });
+  }
+  if (user.verified) {
+    await query("DELETE FROM verification_codes WHERE email = $1", [normalized]);
+    return res.status(409).json({ ok: false, message: "This account is already verified. Please log in." });
+  }
+
   const { rows: codeRows } = await query<{ code: string }>(
     "SELECT code FROM verification_codes WHERE email = $1 AND expires_at > NOW()",
     [normalized]
@@ -459,8 +530,8 @@ async function handleVerifyEmail(req: Request, res: Response) {
   }
 
   await query("DELETE FROM verification_codes WHERE email = $1", [normalized]);
-  await query("UPDATE users SET verified = TRUE WHERE LOWER(email) = $1", [normalized]);
-  log.info({ email: normalized }, "Email verified");
+  await query("UPDATE users SET verified = TRUE WHERE id = $1", [user.id]);
+  log.info({ email: normalized, userId: user.id }, "Email verified");
 
   return res.json({
     ok: true,
