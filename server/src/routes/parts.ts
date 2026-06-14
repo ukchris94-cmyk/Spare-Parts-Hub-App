@@ -36,6 +36,15 @@ async function safeNotify(log: Request["log"], task: () => Promise<void>): Promi
   }
 }
 
+type BargainMessageRow = {
+  id: string;
+  bargain_offer_id: string;
+  sender_user_id: string;
+  sender_name: string | null;
+  message: string;
+  created_at: string;
+};
+
 type BargainOfferRow = {
   id: string;
   part_id: string;
@@ -102,6 +111,35 @@ async function loadBargainOffer(offerId: string) {
 
 function canViewBargainOffer(row: BargainOfferRow, userId: string): boolean {
   return row.vendor_user_id === userId || row.buyer_user_id === userId;
+}
+
+function mapBargainMessage(row: BargainMessageRow) {
+  return {
+    id: row.id,
+    bargainOfferId: row.bargain_offer_id,
+    senderUserId: row.sender_user_id,
+    senderName: row.sender_name,
+    message: row.message,
+    createdAt: row.created_at,
+  };
+}
+
+async function loadBargainMessages(offerId: string) {
+  const { rows } = await query<BargainMessageRow>(
+    `SELECT
+       bom.id,
+       bom.bargain_offer_id,
+       bom.sender_user_id,
+       COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS sender_name,
+       bom.message,
+       bom.created_at
+     FROM bargain_offer_messages bom
+     LEFT JOIN users u ON u.id = bom.sender_user_id
+     WHERE bom.bargain_offer_id = $1
+     ORDER BY bom.created_at ASC`,
+    [offerId],
+  );
+  return rows.map(mapBargainMessage);
 }
 
 router.get("/search", async (req: Request, res: Response) => {
@@ -385,6 +423,18 @@ router.post("/:partId/bargain", async (req: Request, res: Response) => {
         normalizedBuyerUserId,
         normalizedOfferPriceNgn,
         normalizedNote || null,
+      ],
+    );
+
+    await query(
+      `INSERT INTO bargain_offer_messages
+         (id, bargain_offer_id, sender_user_id, message)
+       VALUES ($1, $2, $3, $4)`,
+      [
+        genId("bgm"),
+        offerId,
+        normalizedBuyerUserId,
+        normalizedNote || `Offer sent: ${formattedOffer}`,
       ],
     );
 
@@ -1097,6 +1147,80 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
   });
 });
 
+router.get("/bargain-offers/:offerId/messages", async (req: Request, res: Response) => {
+  const { offerId } = req.params;
+  const userId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+
+  if (!userId) {
+    return res.status(400).json({ ok: false, message: "userId is required" });
+  }
+
+  const offer = await loadBargainOffer(offerId);
+  if (!offer) {
+    return res.status(404).json({ ok: false, message: "Bargain offer not found" });
+  }
+  if (!canViewBargainOffer(offer, userId)) {
+    return res.status(403).json({ ok: false, message: "Not allowed to view this bargain offer" });
+  }
+
+  return res.json({ ok: true, messages: await loadBargainMessages(offerId) });
+});
+
+router.post("/bargain-offers/:offerId/messages", async (req: Request, res: Response) => {
+  const { offerId } = req.params;
+  const log = req.log;
+  const userId = typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
+  const message = typeof req.body?.message === "string" ? req.body.message.trim().slice(0, 1000) : "";
+
+  if (!userId) {
+    return res.status(400).json({ ok: false, message: "userId is required" });
+  }
+  if (!message) {
+    return res.status(400).json({ ok: false, message: "Message is required" });
+  }
+
+  const offer = await loadBargainOffer(offerId);
+  if (!offer) {
+    return res.status(404).json({ ok: false, message: "Bargain offer not found" });
+  }
+  if (!canViewBargainOffer(offer, userId)) {
+    return res.status(403).json({ ok: false, message: "Not allowed to message on this bargain offer" });
+  }
+
+  const messageId = genId("bgm");
+  const { rows } = await query<BargainMessageRow>(
+    `INSERT INTO bargain_offer_messages (id, bargain_offer_id, sender_user_id, message)
+     VALUES ($1, $2, $3, $4)
+     RETURNING
+       id,
+       bargain_offer_id,
+       sender_user_id,
+       (SELECT COALESCE(NULLIF(first_name, ''), split_part(email, '@', 1)) FROM users WHERE users.id = sender_user_id) AS sender_name,
+       message,
+       created_at`,
+    [messageId, offerId, userId, message],
+  );
+
+  await query(
+    `UPDATE bargain_offers SET updated_at = NOW() WHERE id = $1`,
+    [offerId],
+  );
+
+  const recipientUserId = userId === offer.vendor_user_id ? offer.buyer_user_id : offer.vendor_user_id;
+  await safeNotify(log, async () => {
+    await createNotification({
+      recipientUserId,
+      recipientRole: userId === offer.vendor_user_id ? "user" : "vendor",
+      type: "part_bargain_message",
+      title: "New bargain message",
+      message: `${rows[0]?.sender_name || "Someone"} sent a message about "${offer.part_name}".`,
+      relatedBargainOfferId: offer.id,
+    });
+  });
+
+  return res.status(201).json({ ok: true, message: mapBargainMessage(rows[0]) });
+});
+
 router.get("/bargain-offers/:offerId", async (req: Request, res: Response) => {
   const { offerId } = req.params;
   const userId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
@@ -1113,7 +1237,7 @@ router.get("/bargain-offers/:offerId", async (req: Request, res: Response) => {
     return res.status(403).json({ ok: false, message: "Not allowed to view this bargain offer" });
   }
 
-  return res.json({ ok: true, offer: mapBargainOffer(offer) });
+  return res.json({ ok: true, offer: mapBargainOffer(offer), messages: await loadBargainMessages(offerId) });
 });
 
 router.patch("/bargain-offers/:offerId", async (req: Request, res: Response) => {

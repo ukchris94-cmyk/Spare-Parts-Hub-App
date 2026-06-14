@@ -15,6 +15,7 @@ const ORDER_STATUSES = [
   "in_transit",
   "delivered",
   "cancelled",
+  "rejected",
 ] as const;
 
 type OrderStatus = (typeof ORDER_STATUSES)[number];
@@ -136,8 +137,8 @@ router.post("/", async (req: Request, res: Response) => {
                 recipientUserId: row.user_id,
                 recipientRole: "vendor",
                 type: "new_order",
-                title: "New order received",
-                message: "A customer placed an order containing one of your parts.",
+                title: "New order needs review",
+                message: "A customer placed an order containing one of your parts. Accept or reject it from Orders.",
                 relatedOrderId: id,
               }),
             ),
@@ -145,12 +146,6 @@ router.post("/", async (req: Request, res: Response) => {
       }
 
       await Promise.all([
-        notifyRole("dispatcher", {
-          type: "order_coordination",
-          title: "New order needs coordination",
-          message: "A new order is pending and may need pickup or delivery coordination.",
-          relatedOrderId: id,
-        }),
         notifyRole("admin", {
           type: "system_order_activity",
           title: "New order created",
@@ -162,7 +157,7 @@ router.post("/", async (req: Request, res: Response) => {
           recipientRole: "user",
           type: "order_created",
           title: "Order placed",
-          message: "Your order was submitted and is pending confirmation.",
+          message: "Your order was submitted and is waiting for vendor confirmation.",
           relatedOrderId: id,
         }),
       ]);
@@ -353,7 +348,7 @@ router.get("/vendor/:userId", async (req: Request, res: Response) => {
 router.get("/pending", async (req: Request, res: Response) => {
   const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 20;
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 20;
-  const statuses = ["pending", "confirmed", "ready_for_pickup"];
+  const statuses = ["confirmed", "ready_for_pickup"];
   const { rows } = await query<{
     id: string;
     user_id: string;
@@ -387,6 +382,111 @@ router.get("/pending", async (req: Request, res: Response) => {
       createdAt: order.created_at,
       items: order.items ?? [],
     })),
+  });
+});
+
+async function orderContainsVendorPart(orderId: string, vendorUserId: string): Promise<boolean> {
+  const orderResult = await query<{ items: unknown }>(
+    `SELECT items FROM orders WHERE id = $1 LIMIT 1`,
+    [orderId],
+  );
+  const order = orderResult.rows[0];
+  const partIds = Array.isArray(order?.items)
+    ? Array.from(
+        new Set(
+          order.items
+            .map((item: any) => (typeof item?.partId === "string" ? item.partId.trim() : ""))
+            .filter(Boolean),
+        ),
+      )
+    : [];
+
+  if (!partIds.length) return false;
+
+  const partResult = await query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+     FROM parts
+     WHERE user_id = $1 AND id = ANY($2::text[])`,
+    [vendorUserId, partIds],
+  );
+  return Number.parseInt(partResult.rows[0]?.count ?? "0", 10) > 0;
+}
+
+router.post("/:orderId/vendor-decision", async (req: Request, res: Response) => {
+  const { orderId } = req.params;
+  const log = req.log;
+  const vendorUserId = typeof req.body?.vendorUserId === "string" ? req.body.vendorUserId.trim() : "";
+  const action = typeof req.body?.action === "string" ? req.body.action.trim().toLowerCase() : "";
+
+  if (!vendorUserId) {
+    return res.status(400).json({ ok: false, message: "vendorUserId is required" });
+  }
+  if (!["accept", "reject"].includes(action)) {
+    return res.status(400).json({ ok: false, message: "Action must be accept or reject" });
+  }
+
+  const isVendorOrder = await orderContainsVendorPart(orderId, vendorUserId);
+  if (!isVendorOrder) {
+    return res.status(403).json({ ok: false, message: "This order is not linked to your vendor inventory" });
+  }
+
+  const nextStatus = action === "accept" ? "confirmed" : "cancelled";
+  const { rows } = await query<{ id: string; user_id: string; status: string; updated_at: string }>(
+    `UPDATE orders
+     SET status = $1, updated_at = NOW()
+     WHERE id = $2 AND status = 'pending'
+     RETURNING id, user_id, status, updated_at`,
+    [nextStatus, orderId],
+  );
+  const order = rows[0];
+
+  if (!order) {
+    return res.status(409).json({
+      ok: false,
+      message: "Order is no longer waiting for vendor review",
+    });
+  }
+
+  await safeNotify(log, async () => {
+    if (action === "accept") {
+      await Promise.all([
+        createNotification({
+          recipientUserId: order.user_id,
+          recipientRole: "user",
+          type: "order_vendor_accepted",
+          title: "Order accepted",
+          message: "The vendor accepted your order. Delivery coordination can now begin.",
+          relatedOrderId: order.id,
+        }),
+        notifyRole("dispatcher", {
+          type: "order_coordination",
+          title: "Order ready for coordination",
+          message: "A vendor accepted an order that may need pickup or delivery coordination.",
+          relatedOrderId: order.id,
+        }),
+      ]);
+      return;
+    }
+
+    await createNotification({
+      recipientUserId: order.user_id,
+      recipientRole: "user",
+      type: "order_vendor_rejected",
+      title: "Order rejected",
+      message: "The vendor could not accept this order. Please choose another listing or contact support.",
+      relatedOrderId: order.id,
+    });
+  });
+
+  log.info({ orderId, vendorUserId, action }, "Vendor order decision saved");
+  return res.json({
+    ok: true,
+    order: {
+      id: order.id,
+      userId: order.user_id,
+      status: order.status,
+      updatedAt: order.updated_at,
+    },
   });
 });
 

@@ -159,6 +159,17 @@ CREATE INDEX IF NOT EXISTS idx_bargain_offers_buyer
 CREATE INDEX IF NOT EXISTS idx_bargain_offers_part
   ON bargain_offers (part_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS bargain_offer_messages (
+  id               TEXT PRIMARY KEY,
+  bargain_offer_id TEXT NOT NULL REFERENCES bargain_offers(id) ON DELETE CASCADE,
+  sender_user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message          TEXT NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bargain_offer_messages_offer
+  ON bargain_offer_messages (bargain_offer_id, created_at ASC);
+
 CREATE TABLE IF NOT EXISTS notifications (
   id                TEXT PRIMARY KEY,
   recipient_user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
@@ -180,3 +191,15 @@ CREATE INDEX IF NOT EXISTS idx_notifications_role_read
   ON notifications (recipient_role, read, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_bargain_offer
   ON notifications (related_bargain_offer_id);
+
+CREATE TABLE IF NOT EXISTS push_tokens (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token      TEXT NOT NULL UNIQUE,
+  platform   TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_tokens_user
+  ON push_tokens (user_id);

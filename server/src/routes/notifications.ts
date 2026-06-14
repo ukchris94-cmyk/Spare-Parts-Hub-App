@@ -53,6 +53,30 @@ router.get("/", async (req: Request, res: Response) => {
   });
 });
 
+router.post("/push-token", async (req: Request, res: Response) => {
+  const user = req.user;
+  if (!user) return res.status(401).json({ ok: false, message: "Authentication required" });
+
+  const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+  const platform = typeof req.body?.platform === "string" ? req.body.platform.trim().slice(0, 40) : null;
+
+  if (!token) {
+    return res.status(400).json({ ok: false, message: "Push token is required" });
+  }
+
+  await query(
+    `INSERT INTO push_tokens (id, user_id, token, platform)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (token) DO UPDATE SET
+       user_id = EXCLUDED.user_id,
+       platform = EXCLUDED.platform,
+       updated_at = NOW()`,
+    [`pt_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, user.id, token, platform],
+  );
+
+  return res.status(201).json({ ok: true });
+});
+
 router.get("/unread-count", async (req: Request, res: Response) => {
   const user = req.user;
   if (!user) return res.status(401).json({ ok: false, message: "Authentication required" });

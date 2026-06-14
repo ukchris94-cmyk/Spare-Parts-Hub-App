@@ -4,6 +4,52 @@ function genId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
+type PushTokenRow = { token: string };
+
+async function sendPushNotifications(input: NotificationInput): Promise<void> {
+  const tokenResult = input.recipientUserId
+    ? await query<PushTokenRow>(
+        `SELECT token FROM push_tokens WHERE user_id = $1`,
+        [input.recipientUserId],
+      )
+    : await query<PushTokenRow>(
+        `SELECT pt.token
+         FROM push_tokens pt
+         JOIN users u ON u.id = pt.user_id
+         WHERE u.role = $1`,
+        [input.recipientRole],
+      );
+
+  const tokens = tokenResult.rows
+    .map((row) => row.token)
+    .filter((token) => token.startsWith("ExponentPushToken[") || token.startsWith("ExpoPushToken["));
+
+  if (!tokens.length || typeof fetch !== "function") return;
+
+  await fetch("https://exp.host/--/api/v2/push/send", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Accept-Encoding": "gzip, deflate",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(
+      tokens.map((token) => ({
+        to: token,
+        sound: "default",
+        title: input.title,
+        body: input.message,
+        data: {
+          type: input.type,
+          relatedOrderId: input.relatedOrderId ?? undefined,
+          relatedJobId: input.relatedJobId ?? undefined,
+          relatedBargainOfferId: input.relatedBargainOfferId ?? undefined,
+        },
+      })),
+    ),
+  }).catch(() => null);
+}
+
 type NotificationInput = {
   recipientUserId?: string | null;
   recipientRole: string;
@@ -32,6 +78,8 @@ export async function createNotification(input: NotificationInput): Promise<void
       input.relatedBargainOfferId ?? null,
     ],
   );
+
+  await sendPushNotifications(input).catch(() => null);
 }
 
 export async function notifyRole(
