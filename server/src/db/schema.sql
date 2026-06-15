@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS orders (
 
 -- Order line items stored as JSONB for flexibility (e.g. [{ partId, quantity, unitPrice }])
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatcher_id TEXT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_orders_dispatcher_status
+  ON orders (dispatcher_id, status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS part_requests (
   id          TEXT PRIMARY KEY,

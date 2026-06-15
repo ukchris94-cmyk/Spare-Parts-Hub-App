@@ -12,10 +12,14 @@ const ORDER_STATUSES = [
   "pending",
   "confirmed",
   "ready_for_pickup",
+  "accepted",
+  "heading_to_pickup",
+  "picked_up",
   "in_transit",
   "delivered",
   "cancelled",
   "rejected",
+  "failed_delivery",
 ] as const;
 
 type OrderStatus = (typeof ORDER_STATUSES)[number];
@@ -33,19 +37,15 @@ async function safeNotify(log: Request["log"], task: () => Promise<void>): Promi
 }
 
 function buildTrackingSteps(status: string) {
-  const activeIndex =
-    status === "delivered"
-      ? 3
-      : status === "in_transit"
-      ? 2
-      : status === "ready_for_pickup"
-      ? 1
-      : 0;
+  const order = ["confirmed", "accepted", "heading_to_pickup", "picked_up", "in_transit", "delivered"];
+  const activeIndex = Math.max(0, order.indexOf(status));
 
   const steps = [
     { key: "confirmed", title: "Order confirmed" },
-    { key: "ready_for_pickup", title: "Vendor ready for pickup" },
-    { key: "in_transit", title: "Dispatcher on route" },
+    { key: "accepted", title: "Delivery accepted" },
+    { key: "heading_to_pickup", title: "Heading to pickup" },
+    { key: "picked_up", title: "Picked up" },
+    { key: "in_transit", title: "On the way" },
     { key: "delivered", title: "Delivered" },
   ];
 
@@ -86,6 +86,26 @@ async function ensureBargainOfferColumns(client: DbClient): Promise<void> {
   await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ");
   await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS used_order_id TEXT REFERENCES orders(id) ON DELETE SET NULL");
 }
+
+async function ensureOrderDeliveryColumns(client: DbClient): Promise<void> {
+  await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatcher_id TEXT REFERENCES users(id) ON DELETE SET NULL");
+  await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ");
+  await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMPTZ");
+  await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ");
+}
+
+const DISPATCHER_ACTIVE_STATUSES = ["accepted", "heading_to_pickup", "picked_up", "in_transit"];
+const DISPATCHER_HISTORY_STATUSES = ["delivered", "cancelled", "failed_delivery"];
+const DISPATCHER_TRANSITIONS: Record<string, string[]> = {
+  available: ["accepted"],
+  assigned: ["accepted"],
+  confirmed: ["accepted"],
+  ready_for_pickup: ["accepted"],
+  accepted: ["heading_to_pickup", "cancelled", "failed_delivery"],
+  heading_to_pickup: ["picked_up", "cancelled", "failed_delivery"],
+  picked_up: ["in_transit", "cancelled", "failed_delivery"],
+  in_transit: ["delivered", "failed_delivery"],
+};
 
 function toObjectItem(item: unknown): Record<string, any> {
   return item && typeof item === "object" && !Array.isArray(item) ? { ...(item as Record<string, any>) } : {};
@@ -491,6 +511,7 @@ router.get("/pending", async (req: Request, res: Response) => {
      FROM orders o
      LEFT JOIN users u ON u.id = o.user_id
      WHERE status = ANY($1::text[])
+       AND dispatcher_id IS NULL
      ORDER BY o.created_at DESC
      LIMIT $2`,
     [statuses, limit],
@@ -506,6 +527,62 @@ router.get("/pending", async (req: Request, res: Response) => {
       createdAt: order.created_at,
       items: order.items ?? [],
     })),
+  });
+});
+
+router.get("/dispatcher/:dispatcherId/jobs", async (req: Request, res: Response) => {
+  const dispatcherId = typeof req.params.dispatcherId === "string" ? req.params.dispatcherId.trim() : "";
+  if (!dispatcherId) {
+    return res.status(400).json({ ok: false, message: "dispatcherId is required" });
+  }
+
+  await ensureOrderDeliveryColumns({ query } as unknown as DbClient);
+  const { rows } = await query<{
+    id: string;
+    user_id: string;
+    status: string;
+    created_at: string;
+    updated_at: string;
+    items: unknown;
+    buyer_name: string | null;
+    dispatcher_id: string | null;
+  }>(
+    `SELECT
+       o.id,
+       o.user_id,
+       o.status,
+       o.created_at,
+       o.updated_at,
+       o.items,
+       o.dispatcher_id,
+       COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS buyer_name
+     FROM orders o
+     LEFT JOIN users u ON u.id = o.user_id
+     WHERE (o.status = ANY($1::text[]) AND o.dispatcher_id IS NULL)
+        OR (o.dispatcher_id = $2 AND o.status = ANY($3::text[]))
+        OR (o.dispatcher_id = $2 AND o.status = ANY($4::text[]))
+     ORDER BY o.created_at DESC
+     LIMIT 100`,
+    [["confirmed", "ready_for_pickup"], dispatcherId, DISPATCHER_ACTIVE_STATUSES, DISPATCHER_HISTORY_STATUSES],
+  );
+
+  const mapOrder = (order: typeof rows[number]) => ({
+    id: order.id,
+    userId: order.user_id,
+    buyerName: order.buyer_name,
+    status: order.status,
+    createdAt: order.created_at,
+    updatedAt: order.updated_at,
+    dispatcherId: order.dispatcher_id,
+    items: Array.isArray(order.items) ? order.items : [],
+  });
+
+  const orders = rows.map(mapOrder);
+  return res.json({
+    ok: true,
+    available: orders.filter((order) => !order.dispatcherId),
+    active: orders.filter((order) => order.dispatcherId === dispatcherId && DISPATCHER_ACTIVE_STATUSES.includes(order.status)),
+    history: orders.filter((order) => order.dispatcherId === dispatcherId && DISPATCHER_HISTORY_STATUSES.includes(order.status)),
   });
 });
 
@@ -680,22 +757,30 @@ router.post("/:orderId/accept-delivery", async (req: Request, res: Response) => 
   const dispatcherId =
     typeof req.body?.dispatcherId === "string" ? req.body.dispatcherId.trim() : "";
 
+  if (!dispatcherId) {
+    return res.status(400).json({ ok: false, message: "dispatcherId is required" });
+  }
+
+  await ensureOrderDeliveryColumns({ query } as unknown as DbClient);
   const { rows } = await query<{
     id: string;
     user_id: string;
     status: string;
     updated_at: string;
+    dispatcher_id: string | null;
   }>(
     `UPDATE orders
-     SET status = 'in_transit', updated_at = NOW()
-     WHERE id = $1
-     RETURNING id, user_id, status, updated_at`,
-    [orderId],
+     SET status = 'accepted', dispatcher_id = $1, accepted_at = NOW(), updated_at = NOW()
+     WHERE id = $2
+       AND dispatcher_id IS NULL
+       AND status = ANY($3::text[])
+     RETURNING id, user_id, status, updated_at, dispatcher_id`,
+    [dispatcherId, orderId, ["confirmed", "ready_for_pickup"]],
   );
   const order = rows[0];
 
   if (!order) {
-    return res.status(404).json({ ok: false, message: "Order not found" });
+    return res.status(409).json({ ok: false, message: "Delivery job is no longer available" });
   }
 
   await safeNotify(req.log, async () => {
@@ -703,7 +788,7 @@ router.post("/:orderId/accept-delivery", async (req: Request, res: Response) => 
       recipientUserId: order.user_id,
       recipientRole: "user",
       type: "order_status_changed",
-      title: "Order is in transit",
+      title: "Delivery accepted",
       message: "A dispatcher accepted delivery for your order.",
       relatedOrderId: order.id,
     });
@@ -717,8 +802,66 @@ router.post("/:orderId/accept-delivery", async (req: Request, res: Response) => 
       status: order.status,
       updatedAt: order.updated_at,
     },
-    dispatcherId: dispatcherId || null,
+    dispatcherId: order.dispatcher_id,
   });
+});
+
+router.post("/:orderId/dispatcher-status", async (req: Request, res: Response) => {
+  const { orderId } = req.params;
+  const log = req.log;
+  const dispatcherId = typeof req.body?.dispatcherId === "string" ? req.body.dispatcherId.trim() : "";
+  const nextStatus = typeof req.body?.status === "string" ? req.body.status.trim().toLowerCase() : "";
+
+  if (!dispatcherId) {
+    return res.status(400).json({ ok: false, message: "dispatcherId is required" });
+  }
+  if (!nextStatus || !ORDER_STATUSES.includes(nextStatus as OrderStatus)) {
+    return res.status(400).json({ ok: false, message: "Invalid dispatcher status" });
+  }
+
+  await ensureOrderDeliveryColumns({ query } as unknown as DbClient);
+  const currentResult = await query<{ id: string; user_id: string; status: string; dispatcher_id: string | null }>(
+    `SELECT id, user_id, status, dispatcher_id FROM orders WHERE id = $1 LIMIT 1`,
+    [orderId],
+  );
+  const current = currentResult.rows[0];
+  if (!current) {
+    return res.status(404).json({ ok: false, message: "Order not found" });
+  }
+  if (current.dispatcher_id !== dispatcherId) {
+    return res.status(403).json({ ok: false, message: "This delivery is assigned to another dispatcher" });
+  }
+  if (!DISPATCHER_TRANSITIONS[current.status]?.includes(nextStatus)) {
+    return res.status(409).json({ ok: false, message: `Cannot move delivery from ${current.status} to ${nextStatus}` });
+  }
+
+  const { rows } = await query<{ id: string; user_id: string; status: string; updated_at: string }>(
+    `UPDATE orders
+     SET status = $1,
+         picked_up_at = CASE WHEN $1 = 'picked_up' THEN NOW() ELSE picked_up_at END,
+         delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END,
+         updated_at = NOW()
+     WHERE id = $2 AND dispatcher_id = $3 AND status = $4
+     RETURNING id, user_id, status, updated_at`,
+    [nextStatus, orderId, dispatcherId, current.status],
+  );
+  const order = rows[0];
+  if (!order) {
+    return res.status(409).json({ ok: false, message: "Delivery status changed before this update could be saved" });
+  }
+
+  await safeNotify(log, async () => {
+    await createNotification({
+      recipientUserId: order.user_id,
+      recipientRole: "user",
+      type: "order_status_changed",
+      title: "Delivery status updated",
+      message: `Your order is now ${nextStatus.replace(/_/g, " ")}.`,
+      relatedOrderId: order.id,
+    });
+  });
+
+  return res.json({ ok: true, order: { id: order.id, userId: order.user_id, status: order.status, updatedAt: order.updated_at } });
 });
 
 router.get("/:orderId/tracking", async (req: Request, res: Response) => {
