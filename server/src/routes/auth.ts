@@ -192,6 +192,36 @@ router.post("/signup", async (req: Request, res: Response) => {
       text: `Your verification code is ${code}. It expires in 10 minutes.`,
     });
     log.info({ email: normalizedEmail }, "Verification email sent");
+
+    const greeting = normalizedFirstName ? `Hi ${normalizedFirstName},` : "Hi there,";
+    await transporter
+      .sendMail({
+        from: fromEmail,
+        to: normalizedEmail,
+        subject: "Welcome to Spare Parts Hub",
+        text: [
+          greeting,
+          "",
+          "Welcome to Spare Parts Hub. Your account was created successfully.",
+          "",
+          "You can use Spare Parts Hub to browse available parts, connect with vendors, track orders, and manage your spare-parts workflow.",
+          "",
+          "Next steps:",
+          "- Verify your email with the code we sent.",
+          "- Complete your profile in the app.",
+          "- Browse parts or manage your shop workflow based on your account type.",
+          "",
+          "For help, check the Help/FAQs area in the app or contact support through the app.",
+          "",
+          "If you did not create this account, ignore this email.",
+        ].join("\n"),
+      })
+      .then(() => {
+        log.info({ email: normalizedEmail }, "Welcome email sent");
+      })
+      .catch((welcomeErr) => {
+        log.warn({ err: welcomeErr, email: normalizedEmail }, "Welcome email failed");
+      });
   } catch (err) {
     log.error({ err, email: normalizedEmail }, "Signup failed");
     if (String(err).includes("nodemailer") || String(err).includes("sendMail")) {
@@ -205,7 +235,7 @@ router.post("/signup", async (req: Request, res: Response) => {
 
   return res.status(201).json({
     ok: true,
-    message: "Sign up success (placeholder). Verification code generated.",
+    message: "Account created. Verification code and welcome email sent.",
     role: normalizedRole,
     email: normalizedEmail,
   });
