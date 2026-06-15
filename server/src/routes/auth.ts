@@ -79,6 +79,84 @@ function normalizeFirstName(value?: string): string | null {
   return firstToken;
 }
 
+async function ensureWelcomeEmailColumn(): Promise<void> {
+  await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_sent_at TIMESTAMPTZ");
+}
+
+type VerificationUserRow = {
+  id: string;
+  email: string;
+  first_name: string | null;
+  verified: boolean;
+  welcome_email_sent_at: string | null;
+};
+
+async function loadVerificationUser(normalizedEmail: string): Promise<VerificationUserRow | null> {
+  try {
+    const { rows } = await query<VerificationUserRow>(
+      `SELECT id, email, first_name, verified, welcome_email_sent_at
+       FROM users
+       WHERE LOWER(email) = $1
+       LIMIT 1`,
+      [normalizedEmail]
+    );
+    return rows[0] ?? null;
+  } catch (err) {
+    if (!isDbColumnError(err)) throw err;
+    await ensureWelcomeEmailColumn();
+    const { rows } = await query<VerificationUserRow>(
+      `SELECT id, email, first_name, verified, welcome_email_sent_at
+       FROM users
+       WHERE LOWER(email) = $1
+       LIMIT 1`,
+      [normalizedEmail]
+    );
+    return rows[0] ?? null;
+  }
+}
+
+async function sendWelcomeEmailAfterVerification(params: {
+  userId: string;
+  email: string;
+  firstName: string | null;
+  log: Request["log"];
+}): Promise<boolean> {
+  const { userId, email, firstName, log } = params;
+  const greeting = firstName ? `Hi ${firstName},` : "Hi there,";
+
+  await transporter.sendMail({
+    from: fromEmail,
+    to: email,
+    subject: "Welcome to Spare Parts Hub",
+    text: [
+      greeting,
+      "",
+      "Welcome to Spare Parts Hub. Your email has been verified and your account is active.",
+      "",
+      "You can now browse available parts, connect with vendors, track orders, and manage your spare-parts workflow based on your account type.",
+      "",
+      "Next steps:",
+      "- Complete your profile in the app.",
+      "- Browse parts or manage your shop workflow based on your account type.",
+      "- Use the Help/FAQs area in the app if you need support.",
+      "",
+      "If you did not create this account, contact support through the app.",
+    ].join("\n"),
+  });
+
+  try {
+    await ensureWelcomeEmailColumn();
+    await query(
+      "UPDATE users SET welcome_email_sent_at = NOW() WHERE id = $1 AND welcome_email_sent_at IS NULL",
+      [userId]
+    );
+  } catch (err) {
+    log.warn({ err, userId }, "Welcome email sent but timestamp update failed");
+  }
+
+  return true;
+}
+
 router.post("/signup", async (req: Request, res: Response) => {
   const log = req.log;
   const { role, email, password, firstName, fullName } = req.body as {
@@ -193,35 +271,6 @@ router.post("/signup", async (req: Request, res: Response) => {
     });
     log.info({ email: normalizedEmail }, "Verification email sent");
 
-    const greeting = normalizedFirstName ? `Hi ${normalizedFirstName},` : "Hi there,";
-    await transporter
-      .sendMail({
-        from: fromEmail,
-        to: normalizedEmail,
-        subject: "Welcome to Spare Parts Hub",
-        text: [
-          greeting,
-          "",
-          "Welcome to Spare Parts Hub. Your account was created successfully.",
-          "",
-          "You can use Spare Parts Hub to browse available parts, connect with vendors, track orders, and manage your spare-parts workflow.",
-          "",
-          "Next steps:",
-          "- Verify your email with the code we sent.",
-          "- Complete your profile in the app.",
-          "- Browse parts or manage your shop workflow based on your account type.",
-          "",
-          "For help, check the Help/FAQs area in the app or contact support through the app.",
-          "",
-          "If you did not create this account, ignore this email.",
-        ].join("\n"),
-      })
-      .then(() => {
-        log.info({ email: normalizedEmail }, "Welcome email sent");
-      })
-      .catch((welcomeErr) => {
-        log.warn({ err: welcomeErr, email: normalizedEmail }, "Welcome email failed");
-      });
   } catch (err) {
     log.error({ err, email: normalizedEmail }, "Signup failed");
     if (String(err).includes("nodemailer") || String(err).includes("sendMail")) {
@@ -235,7 +284,7 @@ router.post("/signup", async (req: Request, res: Response) => {
 
   return res.status(201).json({
     ok: true,
-    message: "Account created. Verification code and welcome email sent.",
+    message: "Account created. Verification code sent.",
     role: normalizedRole,
     email: normalizedEmail,
   });
@@ -532,11 +581,7 @@ async function handleVerifyEmail(req: Request, res: Response) {
   }
 
   const normalized = email.toLowerCase().trim();
-  const { rows: userRows } = await query<{ id: string; verified: boolean }>(
-    "SELECT id, verified FROM users WHERE LOWER(email) = $1 LIMIT 1",
-    [normalized]
-  );
-  const user = userRows[0];
+  const user = await loadVerificationUser(normalized);
 
   if (!user) {
     return res.status(404).json({ ok: false, message: "No account found for this email" });
@@ -563,10 +608,28 @@ async function handleVerifyEmail(req: Request, res: Response) {
   await query("UPDATE users SET verified = TRUE WHERE id = $1", [user.id]);
   log.info({ email: normalized, userId: user.id }, "Email verified");
 
+  let welcomeEmailSent = false;
+  if (!user.welcome_email_sent_at) {
+    try {
+      welcomeEmailSent = await sendWelcomeEmailAfterVerification({
+        userId: user.id,
+        email: user.email,
+        firstName: user.first_name,
+        log,
+      });
+      log.info({ email: normalized, userId: user.id }, "Welcome email sent after verification");
+    } catch (welcomeErr) {
+      log.warn({ err: welcomeErr, email: normalized, userId: user.id }, "Welcome email failed after verification");
+    }
+  }
+
   return res.json({
     ok: true,
-    message: "Email verified successfully (placeholder).",
+    message: welcomeEmailSent
+      ? "Email verified successfully. Your account is active and your welcome email has been sent."
+      : "Email verified successfully. Your account is active.",
     email: normalized,
+    welcomeEmailSent,
   });
 }
 

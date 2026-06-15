@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_sent_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (LOWER(email));
 
@@ -156,6 +157,10 @@ CREATE INDEX IF NOT EXISTS idx_bargain_offers_vendor
   ON bargain_offers (vendor_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bargain_offers_buyer
   ON bargain_offers (buyer_user_id, created_at DESC);
+ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_price_ngn INTEGER;
+ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS used_order_id TEXT REFERENCES orders(id) ON DELETE SET NULL;
+
 CREATE INDEX IF NOT EXISTS idx_bargain_offers_part
   ON bargain_offers (part_id, created_at DESC);
 

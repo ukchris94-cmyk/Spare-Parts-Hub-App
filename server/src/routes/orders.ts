@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { query } from "../db";
+import { query, withClient } from "../db";
 import { createNotification, notifyRole } from "../services/notifications";
 
 const router = Router();
@@ -56,6 +56,107 @@ function buildTrackingSteps(status: string) {
   }));
 }
 
+class OrderValidationError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+type DbClient = {
+  query: <T = any>(text: string, params?: unknown[]) => Promise<{ rows: T[]; rowCount: number | null }>;
+};
+
+type AcceptedBargainRow = {
+  id: string;
+  part_id: string;
+  buyer_user_id: string;
+  vendor_user_id: string;
+  status: string;
+  accepted_price_ngn: number | null;
+  used_order_id: string | null;
+  current_price_ngn: number | null;
+  part_name: string;
+};
+
+async function ensureBargainOfferColumns(client: DbClient): Promise<void> {
+  await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_price_ngn INTEGER");
+  await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ");
+  await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS used_order_id TEXT REFERENCES orders(id) ON DELETE SET NULL");
+}
+
+function toObjectItem(item: unknown): Record<string, any> {
+  return item && typeof item === "object" && !Array.isArray(item) ? { ...(item as Record<string, any>) } : {};
+}
+
+function requireString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+async function normalizeOrderItems(client: DbClient, userId: string, rawItems: unknown[]): Promise<Record<string, any>[]> {
+  const normalized: Record<string, any>[] = [];
+
+  for (const rawItem of rawItems) {
+    const item = toObjectItem(rawItem);
+    const bargainOfferId = requireString(item.bargainOfferId);
+    if (!bargainOfferId) {
+      normalized.push(item);
+      continue;
+    }
+
+    const requestedPartId = requireString(item.partId);
+    const { rows } = await client.query<AcceptedBargainRow>(
+      `SELECT
+         bo.id,
+         bo.part_id,
+         bo.buyer_user_id,
+         bo.vendor_user_id,
+         bo.status,
+         bo.accepted_price_ngn,
+         bo.used_order_id,
+         p.price_ngn AS current_price_ngn,
+         p.name AS part_name
+       FROM bargain_offers bo
+       JOIN parts p ON p.id = bo.part_id
+       WHERE bo.id = $1
+       FOR UPDATE`,
+      [bargainOfferId],
+    );
+    const offer = rows[0];
+
+    if (!offer) {
+      throw new OrderValidationError(400, "Accepted bargain offer was not found.");
+    }
+    if (offer.buyer_user_id !== userId) {
+      throw new OrderValidationError(403, "This accepted bargain offer belongs to another buyer.");
+    }
+    if (offer.status !== "accepted" || !offer.accepted_price_ngn || offer.accepted_price_ngn <= 0) {
+      throw new OrderValidationError(409, "This bargain offer has not been accepted yet.");
+    }
+    if (offer.used_order_id) {
+      throw new OrderValidationError(409, "This accepted bargain offer has already been used for an order.");
+    }
+    if (requestedPartId && requestedPartId !== offer.part_id) {
+      throw new OrderValidationError(400, "Accepted bargain offer does not match this part.");
+    }
+
+    normalized.push({
+      ...item,
+      partId: offer.part_id,
+      name: requireString(item.name) || offer.part_name,
+      unitPrice: offer.accepted_price_ngn,
+      agreedPrice: offer.accepted_price_ngn,
+      listedPrice: offer.current_price_ngn,
+      bargainOfferId: offer.id,
+      pricingSource: "accepted_bargain",
+    });
+  }
+
+  return normalized;
+}
+
 router.post("/", async (req: Request, res: Response) => {
   const log = req.log;
   const { userId, items } = req.body as { userId?: string; items?: unknown[] };
@@ -65,28 +166,49 @@ router.post("/", async (req: Request, res: Response) => {
   }
 
   const id = genId("ord");
-  const itemsJson = items && Array.isArray(items) ? JSON.stringify(items) : "[]";
+  const rawItems = Array.isArray(items) ? items : [];
 
   try {
-    await query(
-      "INSERT INTO orders (id, user_id, status, items) VALUES ($1, $2, $3, $4::jsonb)",
-      [id, userId, "pending", itemsJson],
-    );
+    const normalizedItems = await withClient(async (client) => {
+      await client.query("BEGIN");
+      try {
+        await ensureBargainOfferColumns(client);
+        const orderItems = await normalizeOrderItems(client, userId, rawItems);
+        await client.query(
+          "INSERT INTO orders (id, user_id, status, items) VALUES ($1, $2, $3, $4::jsonb)",
+          [id, userId, "pending", JSON.stringify(orderItems)],
+        );
+
+        const bargainOfferIds = orderItems
+          .map((item) => requireString(item.bargainOfferId))
+          .filter(Boolean);
+        for (const bargainOfferId of bargainOfferIds) {
+          const result = await client.query(
+            `UPDATE bargain_offers
+             SET used_order_id = $1, updated_at = NOW()
+             WHERE id = $2 AND used_order_id IS NULL`,
+            [id, bargainOfferId],
+          );
+          if (!result.rowCount) {
+            throw new OrderValidationError(409, "This accepted bargain offer has already been used for an order.");
+          }
+        }
+
+        await client.query("COMMIT");
+        return orderItems;
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      }
+    });
+
     const firstQuoteId =
-      Array.isArray(items) &&
-      typeof items[0] === "object" &&
-      items[0] &&
-      "sourceQuoteId" in items[0] &&
-      typeof (items[0] as { sourceQuoteId?: unknown }).sourceQuoteId === "string"
-        ? ((items[0] as { sourceQuoteId: string }).sourceQuoteId || "").trim()
+      typeof normalizedItems[0]?.sourceQuoteId === "string"
+        ? (normalizedItems[0].sourceQuoteId || "").trim()
         : "";
     const firstRequestId =
-      Array.isArray(items) &&
-      typeof items[0] === "object" &&
-      items[0] &&
-      "sourceRequestId" in items[0] &&
-      typeof (items[0] as { sourceRequestId?: unknown }).sourceRequestId === "string"
-        ? ((items[0] as { sourceRequestId: string }).sourceRequestId || "").trim()
+      typeof normalizedItems[0]?.sourceRequestId === "string"
+        ? (normalizedItems[0].sourceRequestId || "").trim()
         : "";
     if (firstQuoteId && firstRequestId) {
       await query(
@@ -109,19 +231,18 @@ router.post("/", async (req: Request, res: Response) => {
         [firstRequestId],
       );
     }
-    const partIds = Array.isArray(items)
-      ? Array.from(
-          new Set(
-            items
-              .map((item: any) =>
-                typeof item?.partId === "string" && item.partId.trim()
-                  ? item.partId.trim()
-                  : null,
-              )
-              .filter((partId: string | null): partId is string => partId !== null),
-          ),
-        )
-      : [];
+
+    const partIds = Array.from(
+      new Set(
+        normalizedItems
+          .map((item: any) =>
+            typeof item?.partId === "string" && item.partId.trim()
+              ? item.partId.trim()
+              : null,
+          )
+          .filter((partId: string | null): partId is string => partId !== null),
+      ),
+    );
 
     await safeNotify(log, async () => {
       if (partIds.length > 0) {
@@ -167,10 +288,13 @@ router.post("/", async (req: Request, res: Response) => {
     return res.status(201).json({
       id,
       userId,
-      items: items ?? [],
+      items: normalizedItems,
       status: "pending",
     });
   } catch (err) {
+    if (err instanceof OrderValidationError) {
+      return res.status(err.status).json({ ok: false, message: err.message });
+    }
     log.error({ err, userId }, "Order create failed");
     throw err;
   }

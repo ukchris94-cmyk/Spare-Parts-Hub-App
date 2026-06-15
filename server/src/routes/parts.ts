@@ -51,6 +51,9 @@ type BargainOfferRow = {
   vendor_user_id: string;
   buyer_user_id: string;
   offer_price_ngn: number;
+  accepted_price_ngn: number | null;
+  accepted_at: string | null;
+  used_order_id: string | null;
   note: string | null;
   vendor_reply: string | null;
   status: string;
@@ -73,6 +76,9 @@ function mapBargainOffer(row: BargainOfferRow) {
     vendorName: row.vendor_name,
     offerPriceNgn: row.offer_price_ngn,
     currentPriceNgn: row.current_price_ngn,
+    acceptedPriceNgn: row.accepted_price_ngn,
+    acceptedAt: row.accepted_at,
+    usedOrderId: row.used_order_id,
     note: row.note,
     vendorReply: row.vendor_reply,
     status: row.status,
@@ -81,7 +87,17 @@ function mapBargainOffer(row: BargainOfferRow) {
   };
 }
 
+let bargainOfferColumnsReady = false;
+async function ensureBargainOfferColumns(): Promise<void> {
+  if (bargainOfferColumnsReady) return;
+  await query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_price_ngn INTEGER");
+  await query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ");
+  await query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS used_order_id TEXT REFERENCES orders(id) ON DELETE SET NULL");
+  bargainOfferColumnsReady = true;
+}
+
 async function loadBargainOffer(offerId: string) {
+  await ensureBargainOfferColumns();
   const { rows } = await query<BargainOfferRow>(
     `SELECT
        bo.id,
@@ -89,6 +105,9 @@ async function loadBargainOffer(offerId: string) {
        bo.vendor_user_id,
        bo.buyer_user_id,
        bo.offer_price_ngn,
+       bo.accepted_price_ngn,
+       bo.accepted_at,
+       bo.used_order_id,
        bo.note,
        bo.vendor_reply,
        bo.status,
@@ -1274,9 +1293,24 @@ router.patch("/bargain-offers/:offerId", async (req: Request, res: Response) => 
   const nextStatus =
     normalizedAction === "accept" ? "accepted" : normalizedAction === "reject" ? "rejected" : null;
 
+  if (nextStatus && current.status !== "open") {
+    return res.status(409).json({ ok: false, message: "This bargain offer has already been decided" });
+  }
+
+  await ensureBargainOfferColumns();
   const { rows } = await query<BargainOfferRow>(
     `UPDATE bargain_offers
      SET status = COALESCE($1, status),
+         accepted_price_ngn = CASE
+           WHEN $1 = 'accepted' THEN offer_price_ngn
+           WHEN $1 = 'rejected' THEN NULL
+           ELSE accepted_price_ngn
+         END,
+         accepted_at = CASE
+           WHEN $1 = 'accepted' THEN NOW()
+           WHEN $1 = 'rejected' THEN NULL
+           ELSE accepted_at
+         END,
          vendor_reply = COALESCE($2, vendor_reply),
          updated_at = NOW()
      WHERE id = $3
@@ -1286,6 +1320,9 @@ router.patch("/bargain-offers/:offerId", async (req: Request, res: Response) => 
        vendor_user_id,
        buyer_user_id,
        offer_price_ngn,
+       accepted_price_ngn,
+       accepted_at,
+       used_order_id,
        note,
        vendor_reply,
        status,
