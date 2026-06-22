@@ -10,7 +10,8 @@
     "migrate": "ts-node -r dotenv/config src/db/migrate.ts",
     "promote-admin": "ts-node -r dotenv/config src/scripts/promote-admin.ts",
     "create-admin": "ts-node -r dotenv/config src/scripts/create-admin.ts",
-    "create-test-users": "ts-node -r dotenv/config src/scripts/create-test-users.ts"
+    "create-test-users": "ts-node -r dotenv/config src/scripts/create-test-users.ts",
+    "generate-password-hash": "ts-node -r dotenv/config src/scripts/generate-password-hash.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -19,7 +20,8 @@
     "nodemailer": "^6.9.15",
     "pg": "^8.13.0",
     "pino": "^9.5.0",
-    "pino-http": "^10.3.0"
+    "pino-http": "^10.3.0",
+    "ts-node": "^10.9.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
