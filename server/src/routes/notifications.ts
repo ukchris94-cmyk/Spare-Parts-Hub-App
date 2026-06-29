@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { query } from "../db";
 import { requireAuthenticated } from "../middleware/auth";
+import { logger } from "../logger";
 
 const router = Router();
 
@@ -72,6 +73,20 @@ router.post("/push-token", async (req: Request, res: Response) => {
        platform = EXCLUDED.platform,
        updated_at = NOW()`,
     [`pt_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, user.id, token, platform],
+  );
+
+  logger.info(
+    {
+      userId: user.id,
+      role: user.role,
+      platform,
+      tokenShape: token.startsWith("ExponentPushToken[")
+        ? "ExponentPushToken[...]"
+        : token.startsWith("ExpoPushToken[")
+          ? "ExpoPushToken[...]"
+          : "unknown",
+    },
+    "Push token registered",
   );
 
   return res.status(201).json({ ok: true });

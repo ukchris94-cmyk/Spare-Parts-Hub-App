@@ -11,6 +11,7 @@
     "promote-admin": "ts-node -r dotenv/config src/scripts/promote-admin.ts",
     "create-admin": "ts-node -r dotenv/config src/scripts/create-admin.ts",
     "create-test-users": "ts-node -r dotenv/config src/scripts/create-test-users.ts",
+    "send-test-push": "ts-node -r dotenv/config src/scripts/send-test-push.ts",
     "generate-password-hash": "ts-node -r dotenv/config src/scripts/generate-password-hash.ts"
   },
   "dependencies": {
