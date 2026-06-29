@@ -45,10 +45,12 @@ async function sendPushNotifications(input: NotificationInput): Promise<void> {
           title: input.title,
           body: input.message,
           data: {
+            notificationId: input.id,
             type: input.type,
             relatedOrderId: input.relatedOrderId ?? undefined,
             relatedJobId: input.relatedJobId ?? undefined,
             relatedBargainOfferId: input.relatedBargainOfferId ?? undefined,
+            ...(input.data ?? {}),
           },
         })),
       ),
@@ -61,6 +63,7 @@ async function sendPushNotifications(input: NotificationInput): Promise<void> {
 }
 
 type NotificationInput = {
+  id?: string;
   recipientUserId?: string | null;
   recipientRole: string;
   type: string;
@@ -69,15 +72,17 @@ type NotificationInput = {
   relatedOrderId?: string | null;
   relatedJobId?: string | null;
   relatedBargainOfferId?: string | null;
+  data?: Record<string, unknown>;
 };
 
 export async function createNotification(input: NotificationInput): Promise<void> {
+  const id = input.id ?? genId("ntf");
   await query(
     `INSERT INTO notifications
        (id, recipient_user_id, recipient_role, type, title, message, related_order_id, related_job_id, related_bargain_offer_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
     [
-      genId("ntf"),
+      id,
       input.recipientUserId ?? null,
       input.recipientRole,
       input.type,
@@ -89,7 +94,7 @@ export async function createNotification(input: NotificationInput): Promise<void
     ],
   );
 
-  await sendPushNotifications(input).catch(() => null);
+  await sendPushNotifications({ ...input, id }).catch(() => null);
 }
 
 export async function notifyRole(

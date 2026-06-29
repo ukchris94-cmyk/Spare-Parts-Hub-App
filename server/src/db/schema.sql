@@ -68,6 +68,36 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_orders_dispatcher_status
   ON orders (dispatcher_id, status, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS delivery_jobs (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+  vendor_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  customer_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  dispatcher_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  pickup_details TEXT,
+  dropoff_details TEXT,
+  status TEXT NOT NULL DEFAULT 'available',
+  issue_note TEXT,
+  failure_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  accepted_at TIMESTAMPTZ,
+  heading_to_pickup_at TIMESTAMPTZ,
+  arrived_at_pickup_at TIMESTAMPTZ,
+  picked_up_at TIMESTAMPTZ,
+  heading_to_dropoff_at TIMESTAMPTZ,
+  arrived_at_dropoff_at TIMESTAMPTZ,
+  delivered_at TIMESTAMPTZ,
+  cancelled_at TIMESTAMPTZ,
+  failed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_jobs_available
+  ON delivery_jobs (status, created_at DESC)
+  WHERE dispatcher_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_delivery_jobs_dispatcher_status
+  ON delivery_jobs (dispatcher_id, status, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS part_requests (
   id          TEXT PRIMARY KEY,
   user_id     TEXT NOT NULL REFERENCES users(id),
