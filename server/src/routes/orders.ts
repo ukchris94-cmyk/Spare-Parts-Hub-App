@@ -28,12 +28,10 @@ function isValidStatus(value: string): value is OrderStatus {
   return ORDER_STATUSES.includes(value as OrderStatus);
 }
 
-async function safeNotify(log: Request["log"], task: () => Promise<void>): Promise<void> {
-  try {
-    await task();
-  } catch (err) {
+function safeNotify(log: Request["log"], task: () => Promise<void>): void {
+  task().catch((err) => {
     log.warn({ err }, "Notification write failed");
-  }
+  });
 }
 
 function buildTrackingSteps(status: string) {

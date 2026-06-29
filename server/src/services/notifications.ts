@@ -26,28 +26,38 @@ async function sendPushNotifications(input: NotificationInput): Promise<void> {
 
   if (!tokens.length || typeof fetch !== "function") return;
 
-  await fetch("https://exp.host/--/api/v2/push/send", {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Accept-Encoding": "gzip, deflate",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(
-      tokens.map((token) => ({
-        to: token,
-        sound: "default",
-        title: input.title,
-        body: input.message,
-        data: {
-          type: input.type,
-          relatedOrderId: input.relatedOrderId ?? undefined,
-          relatedJobId: input.relatedJobId ?? undefined,
-          relatedBargainOfferId: input.relatedBargainOfferId ?? undefined,
-        },
-      })),
-    ),
-  }).catch(() => null);
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : undefined;
+  const timeout = controller ? setTimeout(() => controller.abort(), 3500) : undefined;
+
+  try {
+    await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Accept-Encoding": "gzip, deflate",
+        "Content-Type": "application/json",
+      },
+      signal: controller?.signal,
+      body: JSON.stringify(
+        tokens.map((token) => ({
+          to: token,
+          sound: "default",
+          title: input.title,
+          body: input.message,
+          data: {
+            type: input.type,
+            relatedOrderId: input.relatedOrderId ?? undefined,
+            relatedJobId: input.relatedJobId ?? undefined,
+            relatedBargainOfferId: input.relatedBargainOfferId ?? undefined,
+          },
+        })),
+      ),
+    });
+  } catch {
+    return;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 type NotificationInput = {
