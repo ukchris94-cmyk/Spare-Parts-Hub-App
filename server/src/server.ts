@@ -37,7 +37,10 @@ app.use(
     limit: process.env.JSON_BODY_LIMIT || "50mb",
     verify: (req, _res, buf) => {
       const originalUrl = (req as Request).originalUrl || req.url || "";
-      if (originalUrl.includes("/payments/paystack/webhook")) {
+      if (
+        originalUrl.includes("/payments/webhook/transfer") ||
+        originalUrl.includes("/payments/webhook/card")
+      ) {
         (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
       }
     },
