@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { query, withClient } from "../db";
 import { createNotification, notifyRole } from "../services/notifications";
+import { CheckoutOrderError, createCheckoutOrder } from "../services/orderCheckout";
 
 const router = Router();
 
@@ -419,134 +420,20 @@ router.post("/", async (req: Request, res: Response) => {
     return res.status(400).json({ ok: false, message: "userId is required" });
   }
 
-  const id = genId("ord");
   const rawItems = Array.isArray(items) ? items : [];
 
   try {
-    const normalizedItems = await withClient(async (client) => {
-      await client.query("BEGIN");
-      try {
-        await ensureBargainOfferColumns(client);
-        const orderItems = await normalizeOrderItems(client, userId, rawItems);
-        await client.query(
-          "INSERT INTO orders (id, user_id, status, items) VALUES ($1, $2, $3, $4::jsonb)",
-          [id, userId, "pending", JSON.stringify(orderItems)],
-        );
+    const order = await createCheckoutOrder({ userId, rawItems, log });
 
-        const bargainOfferIds = orderItems
-          .map((item) => requireString(item.bargainOfferId))
-          .filter(Boolean);
-        for (const bargainOfferId of bargainOfferIds) {
-          const result = await client.query(
-            `UPDATE bargain_offers
-             SET used_order_id = $1, updated_at = NOW()
-             WHERE id = $2 AND used_order_id IS NULL`,
-            [id, bargainOfferId],
-          );
-          if (!result.rowCount) {
-            throw new OrderValidationError(409, "This accepted bargain offer has already been used for an order.");
-          }
-        }
-
-        await client.query("COMMIT");
-        return orderItems;
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-      }
-    });
-
-    const firstQuoteId =
-      typeof normalizedItems[0]?.sourceQuoteId === "string"
-        ? (normalizedItems[0].sourceQuoteId || "").trim()
-        : "";
-    const firstRequestId =
-      typeof normalizedItems[0]?.sourceRequestId === "string"
-        ? (normalizedItems[0].sourceRequestId || "").trim()
-        : "";
-    if (firstQuoteId && firstRequestId) {
-      await query(
-        `UPDATE part_request_quotes
-         SET status = 'accepted', updated_at = NOW()
-         WHERE id = $1 AND request_id = $2`,
-        [firstQuoteId, firstRequestId],
-      );
-      await query(
-        `UPDATE part_request_quotes
-         SET status = CASE WHEN id = $1 THEN status ELSE 'closed' END,
-             updated_at = NOW()
-         WHERE request_id = $2`,
-        [firstQuoteId, firstRequestId],
-      );
-      await query(
-        `UPDATE part_requests
-         SET status = 'matched'
-         WHERE id = $1`,
-        [firstRequestId],
-      );
-    }
-
-    const partIds = Array.from(
-      new Set(
-        normalizedItems
-          .map((item: any) =>
-            typeof item?.partId === "string" && item.partId.trim()
-              ? item.partId.trim()
-              : null,
-          )
-          .filter((partId: string | null): partId is string => partId !== null),
-      ),
-    );
-
-    await safeNotify(log, async () => {
-      if (partIds.length > 0) {
-        const { rows: vendorRows } = await query<{ user_id: string | null }>(
-          "SELECT DISTINCT user_id FROM parts WHERE id = ANY($1::text[]) AND user_id IS NOT NULL",
-          [partIds],
-        );
-        await Promise.all(
-          vendorRows
-            .filter((row): row is { user_id: string } => typeof row.user_id === "string")
-            .map((row) =>
-              createNotification({
-                recipientUserId: row.user_id,
-                recipientRole: "vendor",
-                type: "new_order",
-                title: "New order needs review",
-                message: "A customer placed an order containing one of your parts. Accept or reject it from Orders.",
-                relatedOrderId: id,
-              }),
-            ),
-        );
-      }
-
-      await Promise.all([
-        notifyRole("admin", {
-          type: "system_order_activity",
-          title: "New order created",
-          message: "A new customer order was created.",
-          relatedOrderId: id,
-        }),
-        createNotification({
-          recipientUserId: userId,
-          recipientRole: "user",
-          type: "order_created",
-          title: "Order placed",
-          message: "Your order was submitted and is waiting for vendor confirmation.",
-          relatedOrderId: id,
-        }),
-      ]);
-    });
-
-    log.info({ orderId: id, userId }, "Order created");
+    log.info({ orderId: order.id, userId }, "Order created");
     return res.status(201).json({
-      id,
+      id: order.id,
       userId,
-      items: normalizedItems,
-      status: "pending",
+      items: order.items,
+      status: order.status,
     });
   } catch (err) {
-    if (err instanceof OrderValidationError) {
+    if (err instanceof CheckoutOrderError || err instanceof OrderValidationError) {
       return res.status(err.status).json({ ok: false, message: err.message });
     }
     log.error({ err, userId }, "Order create failed");

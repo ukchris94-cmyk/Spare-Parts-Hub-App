@@ -68,6 +68,34 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_orders_dispatcher_status
   ON orders (dispatcher_id, status, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS payment_transactions (
+  id TEXT PRIMARY KEY,
+  reference TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  order_id TEXT UNIQUE REFERENCES orders(id) ON DELETE SET NULL,
+  amount_kobo INTEGER NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'NGN',
+  status TEXT NOT NULL,
+  items JSONB NOT NULL DEFAULT '[]',
+  access_code TEXT,
+  authorization_url TEXT,
+  paystack_transaction_id TEXT,
+  paystack_domain TEXT,
+  paystack_channel TEXT,
+  gateway_response TEXT,
+  paystack_response JSONB,
+  failure_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  initialized_at TIMESTAMPTZ,
+  paid_at TIMESTAMPTZ,
+  verified_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_user_created
+  ON payment_transactions (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_status
+  ON payment_transactions (status, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS delivery_jobs (
   id TEXT PRIMARY KEY,
   order_id TEXT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,

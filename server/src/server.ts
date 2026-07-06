@@ -11,6 +11,7 @@ import usersRouter from "./routes/users";
 import homeRouter from "./routes/home";
 import adminRouter from "./routes/admin";
 import notificationsRouter from "./routes/notifications";
+import paymentsRouter from "./routes/payments";
 
 dotenv.config();
 
@@ -31,7 +32,17 @@ app.use(
   })
 );
 app.use(cors());
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "50mb" }));
+app.use(
+  express.json({
+    limit: process.env.JSON_BODY_LIMIT || "50mb",
+    verify: (req, _res, buf) => {
+      const originalUrl = (req as Request).originalUrl || req.url || "";
+      if (originalUrl.includes("/payments/paystack/webhook")) {
+        (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+      }
+    },
+  })
+);
 
 app.get("/health", async (_req, res) => {
   try {
@@ -67,6 +78,8 @@ app.use("/admin", adminRouter);
 app.use("/api/admin", adminRouter);
 app.use("/notifications", notificationsRouter);
 app.use("/api/notifications", notificationsRouter);
+app.use("/payments", paymentsRouter);
+app.use("/api/payments", paymentsRouter);
 // Compatibility mounts for clients that already include `/home` in API_URL
 // and then append feature paths like `/home/profile` or `/orders/user/:id`.
 app.use("/home/home", homeRouter);
