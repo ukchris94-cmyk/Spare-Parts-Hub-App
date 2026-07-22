@@ -12,6 +12,7 @@ import homeRouter from "./routes/home";
 import adminRouter from "./routes/admin";
 import notificationsRouter from "./routes/notifications";
 import paymentsRouter from "./routes/payments";
+import locationsRouter from "./routes/locations";
 
 dotenv.config();
 
@@ -39,7 +40,8 @@ app.use(
       const originalUrl = (req as Request).originalUrl || req.url || "";
       if (
         originalUrl.includes("/payments/webhook/transfer") ||
-        originalUrl.includes("/payments/webhook/card")
+        originalUrl.includes("/payments/webhook/card") ||
+        originalUrl.includes("/payments/webhook/monnify")
       ) {
         (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
       }
@@ -83,6 +85,8 @@ app.use("/notifications", notificationsRouter);
 app.use("/api/notifications", notificationsRouter);
 app.use("/payments", paymentsRouter);
 app.use("/api/payments", paymentsRouter);
+app.use("/locations", locationsRouter);
+app.use("/api/locations", locationsRouter);
 // Compatibility mounts for clients that already include `/home` in API_URL
 // and then append feature paths like `/home/profile` or `/orders/user/:id`.
 app.use("/home/home", homeRouter);

@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
   id         TEXT PRIMARY KEY,
   first_name TEXT,
   last_name  TEXT,
+  phone      TEXT,
   email      TEXT NOT NULL UNIQUE,
   password_hash TEXT,
   role       TEXT NOT NULL,
@@ -15,6 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_sent_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (LOWER(email));
@@ -110,6 +112,28 @@ CREATE TABLE IF NOT EXISTS delivery_jobs (
   dispatcher_id TEXT REFERENCES users(id) ON DELETE SET NULL,
   pickup_details TEXT,
   dropoff_details TEXT,
+  pickup_formatted_address TEXT,
+  pickup_latitude DOUBLE PRECISION,
+  pickup_longitude DOUBLE PRECISION,
+  pickup_place_id TEXT,
+  pickup_instructions TEXT,
+  pickup_landmark TEXT,
+  pickup_contact_name TEXT,
+  pickup_contact_phone TEXT,
+  dropoff_formatted_address TEXT,
+  dropoff_latitude DOUBLE PRECISION,
+  dropoff_longitude DOUBLE PRECISION,
+  dropoff_place_id TEXT,
+  dropoff_instructions TEXT,
+  dropoff_landmark TEXT,
+  dropoff_contact_name TEXT,
+  dropoff_contact_phone TEXT,
+  dispatcher_latest_latitude DOUBLE PRECISION,
+  dispatcher_latest_longitude DOUBLE PRECISION,
+  dispatcher_location_updated_at TIMESTAMPTZ,
+  dispatcher_heading DOUBLE PRECISION,
+  dispatcher_speed DOUBLE PRECISION,
+  tracking_status TEXT,
   status TEXT NOT NULL DEFAULT 'available',
   issue_note TEXT,
   failure_reason TEXT,
@@ -131,6 +155,21 @@ CREATE INDEX IF NOT EXISTS idx_delivery_jobs_available
   WHERE dispatcher_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_delivery_jobs_dispatcher_status
   ON delivery_jobs (dispatcher_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_delivery_jobs_order_tracking
+  ON delivery_jobs (order_id, dispatcher_id, status);
+
+CREATE TABLE IF NOT EXISTS vendor_pickup_locations (
+  vendor_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  formatted_address TEXT NOT NULL,
+  latitude DOUBLE PRECISION NOT NULL,
+  longitude DOUBLE PRECISION NOT NULL,
+  place_id TEXT,
+  address_components JSONB,
+  instructions TEXT,
+  landmark TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS part_requests (
   id          TEXT PRIMARY KEY,

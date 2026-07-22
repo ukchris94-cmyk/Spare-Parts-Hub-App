@@ -57,6 +57,22 @@ function verifyAuthToken(token: string): TokenPayload | null {
   }
 }
 
+export async function authenticateRequest(req: Request): Promise<AuthenticatedUser | null> {
+  const header = req.header("authorization") || "";
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) return null;
+
+  const payload = verifyAuthToken(match[1]);
+  if (!payload) return null;
+
+  const { rows } = await query<{ id: string; role: string }>(
+    "SELECT id, role FROM users WHERE id = $1 LIMIT 1",
+    [payload.sub]
+  );
+  const user = rows[0];
+  return user ? { id: user.id, role: user.role } : null;
+}
+
 export function requireRoles(...allowedRoles: string[]) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.header("authorization") || "";
@@ -86,26 +102,11 @@ export function requireRoles(...allowedRoles: string[]) {
 
 
 export async function requireAuthenticated(req: Request, res: Response, next: NextFunction) {
-  const header = req.header("authorization") || "";
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  if (!match) {
-    return res.status(401).json({ ok: false, message: "Authentication required" });
-  }
-
-  const payload = verifyAuthToken(match[1]);
-  if (!payload) {
-    return res.status(401).json({ ok: false, message: "Invalid authentication token" });
-  }
-
-  const { rows } = await query<{ id: string; role: string }>(
-    "SELECT id, role FROM users WHERE id = $1 LIMIT 1",
-    [payload.sub]
-  );
-  const user = rows[0];
+  const user = await authenticateRequest(req);
   if (!user) {
     return res.status(401).json({ ok: false, message: "Invalid authentication token" });
   }
 
-  req.user = { id: user.id, role: user.role };
+  req.user = user;
   return next();
 }

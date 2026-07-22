@@ -159,13 +159,14 @@ async function sendWelcomeEmailAfterVerification(params: {
 
 router.post("/signup", async (req: Request, res: Response) => {
   const log = req.log;
-  const { role, email, password, firstName, fullName } = req.body as {
+  const { role, email, password, firstName, fullName, phone } = req.body as {
     role?: string;
     email?: string;
     password?: string;
     firstName?: string;
     lastName?: string;
     fullName?: string;
+    phone?: string;
   };
 
   if (!email || !role || !password) {
@@ -194,6 +195,7 @@ router.post("/signup", async (req: Request, res: Response) => {
       : typeof fullName === "string" && fullName.trim().includes(" ")
         ? fullName.trim().replace(/^\S+\s+/, "").trim() || null
         : null;
+  const normalizedPhone = typeof phone === "string" && phone.trim() ? phone.trim() : null;
   const passwordError = validatePassword(password);
   if (passwordError) {
     return res.status(400).json({ ok: false, message: passwordError });
@@ -217,12 +219,14 @@ router.post("/signup", async (req: Request, res: Response) => {
     const userId = genId("usr");
     const passwordHash = await hashPassword(password);
     try {
+      await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT");
       await query(
-        "INSERT INTO users (id, first_name, last_name, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, $5, $6, FALSE)",
+        "INSERT INTO users (id, first_name, last_name, phone, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)",
         [
           userId,
           normalizedFirstName,
           normalizedLastName,
+          normalizedPhone,
           normalizedEmail,
           passwordHash,
           normalizedRole,

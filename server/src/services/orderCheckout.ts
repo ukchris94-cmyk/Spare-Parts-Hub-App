@@ -76,6 +76,55 @@ function normalizeNgnAmount(value: unknown): number {
   return numeric;
 }
 
+function normalizeCoordinate(value: unknown, min: number, max: number): number | undefined {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric) || numeric < min || numeric > max) return undefined;
+  return numeric;
+}
+
+function normalizeDeliveryLocation(value: unknown): Record<string, any> | undefined {
+  const location = toObjectItem(value);
+  const formattedAddress = requireString(location.formattedAddress).slice(0, 300);
+  const instructions = requireString(location.instructions).slice(0, 500);
+  const landmark = requireString(location.landmark).slice(0, 160);
+  const placeId = requireString(location.placeId).slice(0, 220);
+  const addressComponents = Array.isArray(location.addressComponents)
+    ? location.addressComponents.slice(0, 32).flatMap((item: unknown) => {
+        const component = toObjectItem(item);
+        const longText = requireString(component.longText).slice(0, 160);
+        const shortText = requireString(component.shortText).slice(0, 80);
+        const types = Array.isArray(component.types)
+          ? component.types
+              .filter((type: unknown): type is string => typeof type === "string")
+              .slice(0, 12)
+              .map((type: string) => type.slice(0, 80))
+          : [];
+        return longText || shortText || types.length
+          ? [{ longText: longText || undefined, shortText: shortText || undefined, types }]
+          : [];
+      })
+    : [];
+  const latitude = normalizeCoordinate(location.latitude, -90, 90);
+  const longitude = normalizeCoordinate(location.longitude, -180, 180);
+
+  if (!formattedAddress || latitude === undefined || longitude === undefined) {
+    throw new CheckoutOrderError(
+      400,
+      "Select and confirm a mapped delivery address before checkout."
+    );
+  }
+
+  return {
+    formattedAddress,
+    instructions: instructions || undefined,
+    landmark: landmark || undefined,
+    placeId: placeId || undefined,
+    addressComponents,
+    latitude,
+    longitude,
+  };
+}
+
 async function ensureBargainOfferColumns(client: DbClient): Promise<void> {
   await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_price_ngn INTEGER");
   await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ");
@@ -149,6 +198,7 @@ export async function normalizeCheckoutItems(
         bargainOfferId: offer.id,
         vendorUserId: offer.vendor_user_id,
         pricingSource: "accepted_bargain",
+        deliveryLocation: normalizeDeliveryLocation(item.deliveryLocation),
       });
       continue;
     }
@@ -206,6 +256,7 @@ export async function normalizeCheckoutItems(
         sourceQuoteId: quote.id,
         vendorUserId: quote.vendor_user_id,
         pricingSource: "request_quote",
+        deliveryLocation: normalizeDeliveryLocation(item.deliveryLocation),
       });
       continue;
     }
@@ -241,6 +292,7 @@ export async function normalizeCheckoutItems(
       unitPrice: part.price_ngn,
       vendorUserId: part.user_id,
       pricingSource: "catalog",
+      deliveryLocation: normalizeDeliveryLocation(item.deliveryLocation),
     });
   }
 

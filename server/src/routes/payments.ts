@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHash, createHmac, timingSafeEqual } from "crypto";
 import { Router, Request, Response } from "express";
 import { PoolClient } from "pg";
 import { withClient, query } from "../db";
@@ -41,6 +41,7 @@ type PaymentTransactionRow = {
   provider_response: unknown;
   provider_reference: string | null;
   checkout_url: string | null;
+  failure_reason: string | null;
   created_at: string;
   updated_at: string;
   paid_at: string | null;
@@ -54,11 +55,11 @@ function readIntEnv(name: string, fallback: number): number {
 }
 
 function paymentProvider(): string {
-  return process.env.PAYMENT_PROVIDER?.trim() || "manual_bank_transfer";
+  return process.env.PAYMENT_PROVIDER?.trim() || "monnify";
 }
 
 function cardPaymentProvider(): string {
-  return process.env.CARD_PAYMENT_PROVIDER?.trim() || "hosted_card";
+  return process.env.CARD_PAYMENT_PROVIDER?.trim() || paymentProvider();
 }
 
 function paymentCurrency(): string {
@@ -74,7 +75,7 @@ function taxBps(): number {
 }
 
 function paymentExpiryMinutes(): number {
-  return Math.max(5, readIntEnv("PAYMENT_EXPIRY_MINUTES", 1440));
+  return Math.max(5, readIntEnv("PAYMENT_EXPIRY_MINUTES", 40));
 }
 
 function paymentReferencePrefix(): string {
@@ -103,6 +104,257 @@ function requireBankInstructions() {
     throw new CheckoutOrderError(503, "Bank transfer details are not configured on the server.");
   }
   return instructions;
+}
+
+type MonnifyPaymentMethod = "ACCOUNT_TRANSFER" | "CARD";
+
+type MonnifyCheckoutMethod = "bank_transfer" | "card";
+
+type MonnifyEnvelope<T> = {
+  requestSuccessful?: boolean;
+  responseMessage?: string;
+  responseCode?: string;
+  responseBody?: T;
+};
+
+type MonnifyAuthBody = {
+  accessToken?: string;
+  expiresIn?: number;
+};
+
+type MonnifyInitBody = {
+  checkoutUrl?: string;
+  transactionReference?: string;
+  paymentReference?: string;
+};
+
+type MonnifyVerifyBody = {
+  paymentReference?: string;
+  transactionReference?: string;
+  paymentStatus?: string;
+  amountPaid?: number | string;
+  totalPayable?: number | string;
+  settlementAmount?: number | string;
+  currencyCode?: string;
+  paymentMethod?: string;
+};
+
+let monnifyTokenCache: { token: string; expiresAtMs: number } | null = null;
+
+function monnifyBaseUrl(): string {
+  const configured = process.env.MONNIFY_BASE_URL?.trim();
+  if (configured) return configured.replace(/\/+$/, "");
+  if (process.env.NODE_ENV === "production") {
+    throw new CheckoutOrderError(503, "MONNIFY_BASE_URL is not configured on the server.");
+  }
+  return "https://sandbox.monnify.com";
+}
+
+function monnifyConfig() {
+  const apiKey = process.env.MONNIFY_API_KEY?.trim();
+  const secretKey = process.env.MONNIFY_SECRET_KEY?.trim();
+  const contractCode = process.env.MONNIFY_CONTRACT_CODE?.trim();
+  if (!apiKey || !secretKey || !contractCode) {
+    throw new CheckoutOrderError(503, "Monnify checkout is not configured on the server.");
+  }
+  return {
+    baseUrl: monnifyBaseUrl(),
+    apiKey,
+    secretKey,
+    contractCode,
+  };
+}
+
+function monnifyRedirectUrl(callbackUrl?: unknown): string {
+  if (typeof callbackUrl === "string" && callbackUrl.trim()) {
+    return callbackUrl.trim();
+  }
+  const configured = process.env.MONNIFY_REDIRECT_URL?.trim();
+  if (configured) return configured;
+  throw new CheckoutOrderError(503, "MONNIFY_REDIRECT_URL is not configured on the server.");
+}
+
+function monnifyMethodFor(method: MonnifyCheckoutMethod): MonnifyPaymentMethod {
+  return method === "card" ? "CARD" : "ACCOUNT_TRANSFER";
+}
+
+function nairaFromKobo(kobo: number): number {
+  return Math.round(kobo) / 100;
+}
+
+function koboFromNaira(value: unknown): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? Math.round(numeric * 100) : 0;
+}
+
+function monnifyPaymentIsSuccessful(status: unknown): boolean {
+  return typeof status === "string" && status.trim().toUpperCase() === "PAID";
+}
+
+function monnifyPaymentIsTerminalFailure(status: unknown): boolean {
+  const normalized = typeof status === "string" ? status.trim().toUpperCase() : "";
+  return ["FAILED", "REVERSED", "EXPIRED", "PARTIALLY_PAID"].includes(normalized);
+}
+
+async function parseJsonResponse<T>(response: globalThis.Response): Promise<T | null> {
+  return (await response.json().catch(() => null)) as T | null;
+}
+
+async function getMonnifyAccessToken(): Promise<string> {
+  const config = monnifyConfig();
+  if (monnifyTokenCache && monnifyTokenCache.expiresAtMs > Date.now() + 60_000) {
+    return monnifyTokenCache.token;
+  }
+
+  const basic = Buffer.from(`${config.apiKey}:${config.secretKey}`).toString("base64");
+  const response = await fetch(`${config.baseUrl}/api/v1/auth/login`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${basic}`,
+      "Content-Type": "application/json",
+    },
+  });
+  const payload = await parseJsonResponse<MonnifyEnvelope<MonnifyAuthBody>>(response);
+  const token = payload?.responseBody?.accessToken;
+  if (!response.ok || !token) {
+    throw new CheckoutOrderError(
+      response.status >= 500 ? 502 : 503,
+      payload?.responseMessage || "Could not authenticate with Monnify.",
+    );
+  }
+
+  const expiresInSeconds = payload?.responseBody?.expiresIn || 3600;
+  monnifyTokenCache = {
+    token,
+    expiresAtMs: Date.now() + Math.max(60, expiresInSeconds - 60) * 1000,
+  };
+  return token;
+}
+
+async function initializeMonnifyCheckout(input: {
+  reference: string;
+  totalKobo: number;
+  currency: string;
+  method: MonnifyCheckoutMethod;
+  user: { id: string; name?: string | null; email?: string | null };
+  itemCount: number;
+  callbackUrl?: unknown;
+}): Promise<{ checkoutUrl: string; providerReference: string; payload: Record<string, unknown> }> {
+  const config = monnifyConfig();
+  const accessToken = await getMonnifyAccessToken();
+  const response = await fetch(`${config.baseUrl}/api/v1/merchant/transactions/init-transaction`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      amount: nairaFromKobo(input.totalKobo),
+      paymentReference: input.reference,
+      paymentDescription:
+        input.method === "card"
+          ? "Spare Parts Hub card checkout"
+          : "Spare Parts Hub bank transfer checkout",
+      currencyCode: input.currency,
+      contractCode: config.contractCode,
+      redirectUrl: monnifyRedirectUrl(input.callbackUrl),
+      customerName: input.user.name || "Spare Parts Hub Customer",
+      customerEmail: input.user.email || `${input.user.id}@sparepartshub.local`,
+      paymentMethods: [monnifyMethodFor(input.method)],
+      metaData: {
+        userId: input.user.id,
+        itemCount: input.itemCount,
+        source: "spare_parts_hub_mobile",
+        paymentMethod: input.method,
+      },
+    }),
+  });
+  const payload = await parseJsonResponse<MonnifyEnvelope<MonnifyInitBody>>(response);
+  const body = payload?.responseBody;
+  const checkoutUrl = body?.checkoutUrl || "";
+  if (!response.ok || !checkoutUrl) {
+    throw new CheckoutOrderError(
+      response.status >= 500 ? 502 : 400,
+      payload?.responseMessage || "Monnify checkout initialization failed.",
+    );
+  }
+
+  return {
+    checkoutUrl,
+    providerReference: body?.transactionReference || body?.paymentReference || "",
+    payload: (payload || {}) as Record<string, unknown>,
+  };
+}
+
+async function verifyMonnifyPayment(input: {
+  paymentReference: string;
+  transactionReference?: string | null;
+}): Promise<MonnifyVerifyBody | null> {
+  const config = monnifyConfig();
+  const accessToken = await getMonnifyAccessToken();
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+  };
+
+  const urls = input.transactionReference
+    ? [
+        `${config.baseUrl}/api/v2/transactions/${encodeURIComponent(input.transactionReference)}`,
+        `${config.baseUrl}/api/v2/merchant/transactions/query?paymentReference=${encodeURIComponent(input.paymentReference)}`,
+      ]
+    : [
+        `${config.baseUrl}/api/v2/merchant/transactions/query?paymentReference=${encodeURIComponent(input.paymentReference)}`,
+      ];
+
+  for (const url of urls) {
+    const response = await fetch(url, { method: "GET", headers });
+    const payload = await parseJsonResponse<MonnifyEnvelope<MonnifyVerifyBody>>(response);
+    if (response.ok && payload?.responseBody) {
+      return payload.responseBody;
+    }
+  }
+  return null;
+}
+
+function verifyMonnifyWebhookSignature(req: Request): boolean {
+  const secret = process.env.MONNIFY_SECRET_KEY?.trim();
+  if (!secret) return false;
+  const signature = req.header("monnify-signature") || "";
+  if (!signature) {
+    return process.env.NODE_ENV !== "production" && process.env.MONNIFY_ALLOW_UNSIGNED_SANDBOX_WEBHOOKS === "true";
+  }
+
+  const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+  const bodyString = rawBody ? rawBody.toString("utf8") : JSON.stringify(req.body || {});
+  const expected = createHash("sha512").update(`${secret}${bodyString}`).digest("hex");
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  return (
+    actualBuffer.length === expectedBuffer.length &&
+    timingSafeEqual(actualBuffer, expectedBuffer)
+  );
+}
+
+function monnifyReferenceFromPayload(body: Record<string, any>): {
+  paymentReference: string;
+  transactionReference: string;
+} {
+  const eventData = body.eventData && typeof body.eventData === "object" ? body.eventData : body;
+  const paymentReference =
+    typeof eventData.paymentReference === "string"
+      ? eventData.paymentReference.trim()
+      : typeof body.paymentReference === "string"
+        ? body.paymentReference.trim()
+        : typeof body.reference === "string"
+          ? body.reference.trim()
+          : "";
+  const transactionReference =
+    typeof eventData.transactionReference === "string"
+      ? eventData.transactionReference.trim()
+      : typeof body.transactionReference === "string"
+        ? body.transactionReference.trim()
+        : "";
+  return { paymentReference, transactionReference };
 }
 
 function calculateBreakdown(subtotalKobo: number) {
@@ -179,11 +431,12 @@ function publicPayment(row: PaymentTransactionRow) {
     currency: row.currency,
     checkoutUrl: row.checkout_url,
     providerReference: row.provider_reference,
+    reviewNote: row.failure_reason,
     expiresAt: row.expires_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     paidAt: row.paid_at,
-    bankInstructions: bankInstructions(),
+    bankInstructions: row.provider === "monnify" ? { bankName: "", accountName: "", accountNumber: "" } : bankInstructions(),
   };
 }
 
@@ -352,6 +605,135 @@ async function finalizeAutomaticPayment(input: {
   return result;
 }
 
+async function createMonnifyPendingCheckout(input: {
+  user: { id: string; role: string };
+  rawItems: unknown[];
+  method: MonnifyCheckoutMethod;
+  callbackUrl?: unknown;
+}): Promise<PaymentTransactionRow> {
+  const setup = await withClient(async (client) => {
+    await client.query("BEGIN");
+    try {
+      await ensurePaymentTransactionsTable(client);
+      const items = await normalizeCheckoutItems(client, input.user.id, input.rawItems);
+      const subtotalKobo = calculateCheckoutAmountKobo(items);
+      const breakdown = calculateBreakdown(subtotalKobo);
+      const expiresMinutes = paymentExpiryMinutes();
+      const reference = buildPaymentReference();
+      const status: PaymentStatus = input.method === "card" ? "awaiting_card" : "awaiting_transfer";
+      const provider = "monnify";
+
+      const { rows } = await client.query<PaymentTransactionRow>(
+        `INSERT INTO payment_transactions
+           (id, reference, user_id, amount_kobo, subtotal_kobo, platform_fee_kobo, tax_kobo,
+            total_kobo, currency, status, provider, method, items, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $4, $8, $9, $10, $11, $12::jsonb,
+                 NOW() + ($13::text || ' minutes')::interval)
+         RETURNING *`,
+        [
+          genCheckoutId("pay"),
+          reference,
+          input.user.id,
+          breakdown.totalKobo,
+          breakdown.subtotalKobo,
+          breakdown.platformFeeKobo,
+          breakdown.taxKobo,
+          breakdown.currency,
+          status,
+          provider,
+          input.method,
+          JSON.stringify(items),
+          expiresMinutes,
+        ],
+      );
+
+      await client.query("COMMIT");
+      return { payment: rows[0], itemCount: items.length };
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    }
+  });
+
+  const monnify = await initializeMonnifyCheckout({
+    reference: setup.payment.reference,
+    totalKobo: setup.payment.total_kobo ?? setup.payment.amount_kobo,
+    currency: setup.payment.currency,
+    method: input.method,
+    user: input.user,
+    itemCount: setup.itemCount,
+    callbackUrl: input.callbackUrl,
+  });
+
+  const updated = await query<PaymentTransactionRow>(
+    `UPDATE payment_transactions
+     SET checkout_url = $2,
+         provider_reference = $3,
+         provider_response = $4::jsonb,
+         updated_at = NOW()
+     WHERE reference = $1
+     RETURNING *`,
+    [
+      setup.payment.reference,
+      monnify.checkoutUrl,
+      monnify.providerReference || null,
+      JSON.stringify(monnify.payload),
+    ],
+  );
+
+  return updated.rows[0] || setup.payment;
+}
+
+async function refreshMonnifyPayment(payment: PaymentTransactionRow, log: Request["log"]): Promise<PaymentTransactionRow> {
+  if (payment.provider !== "monnify" || payment.status === "paid" || payment.order_id) {
+    return payment;
+  }
+  if (!["awaiting_transfer", "awaiting_card"].includes(payment.status)) {
+    return payment;
+  }
+
+  const verified = await verifyMonnifyPayment({
+    paymentReference: payment.reference,
+    transactionReference: payment.provider_reference,
+  });
+  if (!verified) return payment;
+
+  if (monnifyPaymentIsSuccessful(verified.paymentStatus)) {
+    const result = await finalizeAutomaticPayment({
+      reference: payment.reference,
+      amountKobo: koboFromNaira(verified.amountPaid || verified.totalPayable),
+      currency: verified.currencyCode || payment.currency,
+      providerPayload: verified as Record<string, unknown>,
+      log,
+    });
+    return result.payment;
+  }
+
+  if (monnifyPaymentIsTerminalFailure(verified.paymentStatus)) {
+    const nextStatus: PaymentStatus = verified.paymentStatus === "EXPIRED" ? "expired" : "rejected";
+    const updated = await query<PaymentTransactionRow>(
+      `UPDATE payment_transactions
+       SET status = $2,
+           failure_reason = $3,
+           provider_response = $4::jsonb,
+           verified_at = NOW(),
+           updated_at = NOW()
+       WHERE reference = $1
+         AND status IN ('awaiting_transfer', 'awaiting_card')
+       RETURNING *`,
+      [
+        payment.reference,
+        nextStatus,
+        `Monnify payment status: ${verified.paymentStatus}`,
+        JSON.stringify(verified),
+      ],
+    );
+    return updated.rows[0] || payment;
+  }
+
+  return payment;
+}
+
 router.post("/checkout/initialize", requireAuthenticated, async (req: Request, res: Response) => {
   const user = req.user;
   const log = req.log;
@@ -360,52 +742,19 @@ router.post("/checkout/initialize", requireAuthenticated, async (req: Request, r
   }
 
   try {
-    const bank = requireBankInstructions();
     const rawItems = Array.isArray((req.body as { items?: unknown[] })?.items)
       ? (req.body as { items: unknown[] }).items
       : [];
 
-    const payment = await withClient(async (client) => {
-      await client.query("BEGIN");
-      try {
-        await ensurePaymentTransactionsTable(client);
-        const items = await normalizeCheckoutItems(client, user.id, rawItems);
-        const subtotalKobo = calculateCheckoutAmountKobo(items);
-        const breakdown = calculateBreakdown(subtotalKobo);
-        const expiresMinutes = paymentExpiryMinutes();
-
-        const { rows } = await client.query<PaymentTransactionRow>(
-          `INSERT INTO payment_transactions
-             (id, reference, user_id, amount_kobo, subtotal_kobo, platform_fee_kobo, tax_kobo,
-              total_kobo, currency, status, provider, method, items, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $4, $8, 'awaiting_transfer',
-                   $9, 'bank_transfer', $10::jsonb, NOW() + ($11::text || ' minutes')::interval)
-           RETURNING *`,
-          [
-            genCheckoutId("pay"),
-            buildPaymentReference(),
-            user.id,
-            breakdown.totalKobo,
-            breakdown.subtotalKobo,
-            breakdown.platformFeeKobo,
-            breakdown.taxKobo,
-            breakdown.currency,
-            paymentProvider(),
-            JSON.stringify(items),
-            expiresMinutes,
-          ],
-        );
-
-        await client.query("COMMIT");
-        return rows[0];
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-      }
+    const payment = await createMonnifyPendingCheckout({
+      user,
+      rawItems,
+      method: "bank_transfer",
+      callbackUrl: req.body?.callbackUrl,
     });
 
-    log.info({ reference: payment.reference, userId: user.id }, "Bank transfer checkout initialized");
-    return res.status(201).json({ ok: true, payment: publicPayment(payment), bankInstructions: bank });
+    log.info({ reference: payment.reference, userId: user.id }, "Monnify bank transfer checkout initialized");
+    return res.status(201).json({ ok: true, payment: publicPayment(payment) });
   } catch (err) {
     if (err instanceof CheckoutOrderError) {
       return res.status(err.status).json({ ok: false, message: err.message });
@@ -422,140 +771,20 @@ router.post("/card/initialize", requireAuthenticated, async (req: Request, res: 
     return res.status(401).json({ ok: false, message: "Authentication required" });
   }
 
-  const initUrl = process.env.CARD_CHECKOUT_INIT_URL?.trim();
-  const secret = process.env.CARD_CHECKOUT_SECRET?.trim();
-  if (!initUrl || !secret) {
-    return res.status(503).json({
-      ok: false,
-      message: "Card checkout provider is not configured on the server.",
-    });
-  }
-
   try {
     const rawItems = Array.isArray((req.body as { items?: unknown[] })?.items)
       ? (req.body as { items: unknown[] }).items
       : [];
 
-    const setup = await withClient(async (client) => {
-      await client.query("BEGIN");
-      try {
-        await ensurePaymentTransactionsTable(client);
-        const items = await normalizeCheckoutItems(client, user.id, rawItems);
-        const subtotalKobo = calculateCheckoutAmountKobo(items);
-        const breakdown = calculateBreakdown(subtotalKobo);
-        const expiresMinutes = paymentExpiryMinutes();
-        const reference = buildPaymentReference();
-
-        const { rows } = await client.query<PaymentTransactionRow>(
-          `INSERT INTO payment_transactions
-             (id, reference, user_id, amount_kobo, subtotal_kobo, platform_fee_kobo, tax_kobo,
-              total_kobo, currency, status, provider, method, items, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $4, $8, 'awaiting_card',
-                   $9, 'card', $10::jsonb, NOW() + ($11::text || ' minutes')::interval)
-           RETURNING *`,
-          [
-            genCheckoutId("pay"),
-            reference,
-            user.id,
-            breakdown.totalKobo,
-            breakdown.subtotalKobo,
-            breakdown.platformFeeKobo,
-            breakdown.taxKobo,
-            breakdown.currency,
-            cardPaymentProvider(),
-            JSON.stringify(items),
-            expiresMinutes,
-          ],
-        );
-
-        await client.query("COMMIT");
-        return { payment: rows[0], items };
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-      }
+    const payment = await createMonnifyPendingCheckout({
+      user,
+      rawItems,
+      method: "card",
+      callbackUrl: req.body?.callbackUrl,
     });
 
-    const callbackUrl =
-      typeof req.body?.callbackUrl === "string" && req.body.callbackUrl.trim()
-        ? req.body.callbackUrl.trim()
-        : process.env.CARD_CHECKOUT_CALLBACK_URL?.trim();
-    const webhookUrl = process.env.CARD_CHECKOUT_WEBHOOK_URL?.trim();
-
-    const providerResponse = await fetch(initUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        reference: setup.payment.reference,
-        amountKobo: setup.payment.total_kobo ?? setup.payment.amount_kobo,
-        currency: setup.payment.currency,
-        callbackUrl,
-        webhookUrl,
-        metadata: {
-          userId: user.id,
-          source: "spare_parts_hub_mobile",
-          paymentMethod: "card",
-          itemCount: setup.items.length,
-        },
-      }),
-    });
-    const providerPayload = (await providerResponse.json().catch(() => null)) as
-      | {
-          checkoutUrl?: string;
-          checkout_url?: string;
-          authorizationUrl?: string;
-          authorization_url?: string;
-          providerReference?: string;
-          provider_reference?: string;
-          reference?: string;
-          message?: string;
-        }
-      | null;
-
-    if (!providerResponse.ok) {
-      throw new CheckoutOrderError(
-        providerResponse.status >= 500 ? 502 : 400,
-        providerPayload?.message || "Card provider checkout initialization failed.",
-      );
-    }
-
-    const checkoutUrl =
-      providerPayload?.checkoutUrl ||
-      providerPayload?.checkout_url ||
-      providerPayload?.authorizationUrl ||
-      providerPayload?.authorization_url ||
-      "";
-    const providerReference =
-      providerPayload?.providerReference ||
-      providerPayload?.provider_reference ||
-      providerPayload?.reference ||
-      "";
-
-    if (!checkoutUrl) {
-      throw new CheckoutOrderError(502, "Card provider did not return a checkout URL.");
-    }
-
-    const updated = await query<PaymentTransactionRow>(
-      `UPDATE payment_transactions
-       SET checkout_url = $2,
-           provider_reference = $3,
-           provider_response = $4::jsonb,
-           updated_at = NOW()
-       WHERE reference = $1
-       RETURNING *`,
-      [
-        setup.payment.reference,
-        checkoutUrl,
-        providerReference || null,
-        JSON.stringify(providerPayload || {}),
-      ],
-    );
-
-    log.info({ reference: setup.payment.reference, userId: user.id }, "Card checkout initialized");
-    return res.status(201).json({ ok: true, payment: publicPayment(updated.rows[0]) });
+    log.info({ reference: payment.reference, userId: user.id }, "Monnify card checkout initialized");
+    return res.status(201).json({ ok: true, payment: publicPayment(payment) });
   } catch (err) {
     if (err instanceof CheckoutOrderError) {
       return res.status(err.status).json({ ok: false, message: err.message });
@@ -585,7 +814,82 @@ router.get("/checkout/:reference", requireAuthenticated, async (req: Request, re
   if (!userCanReadPayment(user, payment)) {
     return res.status(403).json({ ok: false, message: "Not authorized" });
   }
-  return res.json({ ok: true, payment: publicPayment(payment) });
+
+  try {
+    const refreshed = await refreshMonnifyPayment(payment, req.log);
+    return res.json({ ok: true, payment: publicPayment(refreshed) });
+  } catch (err) {
+    if (err instanceof CheckoutOrderError) {
+      return res.status(err.status).json({ ok: false, message: err.message });
+    }
+    req.log.error({ err, reference: payment.reference }, "Monnify payment refresh failed");
+    throw err;
+  }
+});
+
+router.post("/webhook/monnify", async (req: Request, res: Response) => {
+  if (!verifyMonnifyWebhookSignature(req)) {
+    req.log.warn("Invalid Monnify webhook signature");
+    return res.status(401).json({ ok: false, message: "Invalid signature" });
+  }
+
+  const body = (req.body || {}) as Record<string, any>;
+  const { paymentReference, transactionReference } = monnifyReferenceFromPayload(body);
+  if (!paymentReference) {
+    return res.status(400).json({ ok: false, message: "paymentReference is required" });
+  }
+
+  try {
+    await ensurePaymentTransactionsSchema();
+    const verified = await verifyMonnifyPayment({
+      paymentReference,
+      transactionReference,
+    });
+    if (!verified) {
+      return res.status(404).json({ ok: false, message: "Monnify transaction was not found." });
+    }
+
+    if (!monnifyPaymentIsSuccessful(verified.paymentStatus)) {
+      if (monnifyPaymentIsTerminalFailure(verified.paymentStatus)) {
+        await query(
+          `UPDATE payment_transactions
+           SET status = $2,
+               failure_reason = $3,
+               provider_response = $4::jsonb,
+               verified_at = NOW(),
+               updated_at = NOW()
+           WHERE reference = $1
+             AND status IN ('awaiting_transfer', 'awaiting_card')`,
+          [
+            paymentReference,
+            verified.paymentStatus === "EXPIRED" ? "expired" : "rejected",
+            `Monnify payment status: ${verified.paymentStatus}`,
+            JSON.stringify({ webhook: body, verified }),
+          ],
+        );
+      }
+      return res.json({ ok: true, ignored: true, status: verified.paymentStatus });
+    }
+
+    const result = await finalizeAutomaticPayment({
+      reference: paymentReference,
+      amountKobo: koboFromNaira(verified.amountPaid || verified.totalPayable),
+      currency: verified.currencyCode || paymentCurrency(),
+      providerPayload: { webhook: body, verified },
+      log: req.log,
+    });
+    return res.json({
+      ok: true,
+      payment: publicPayment(result.payment),
+      orderId: result.payment.order_id,
+    });
+  } catch (err) {
+    if (err instanceof CheckoutOrderError) {
+      return res.status(err.status).json({ ok: false, message: err.message });
+    }
+    req.log.error({ err, reference: paymentReference }, "Monnify webhook failed");
+    throw err;
+  }
 });
 
 router.post("/webhook/transfer", async (req: Request, res: Response) => {
