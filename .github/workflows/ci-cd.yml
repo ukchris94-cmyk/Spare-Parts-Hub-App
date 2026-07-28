@@ -46,19 +46,26 @@ jobs:
             --delete \
             server/dist/ \
             $SERVER_USER@${{ secrets.SERVER_IP }}:$APP_DIR/server/dist/
+          rsync -avz \
+            server/package.json \
+            server/package-lock.json \
+            $SERVER_USER@${{ secrets.SERVER_IP }}:$APP_DIR/server/
 
       # ---------- INSTALL PROD DEPS ----------
       - name: Install production dependencies on server
         run: |
           ssh $SERVER_USER@${{ secrets.SERVER_IP }} << EOF
             cd $APP_DIR/server
-            npm ci 
+            if [ -d node_modules ]; then
+              sudo chown -R $SERVER_USER:$SERVER_USER node_modules
+            fi
+            npm ci --omit=dev --no-audit --no-fund
           EOF
 
       # ---------- RESTART PM2 ----------
       - name: Restart PM2
         run: |
           ssh $SERVER_USER@${{ secrets.SERVER_IP }} << EOF
-            pm2 restart spare-parts-hub
+            NODE_ENV=production pm2 restart spare-parts-hub --update-env
             pm2 save
           EOF
