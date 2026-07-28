@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { query } from "../db";
 import { createNotification } from "../services/notifications";
+import { publicPartImageUrl, sendPartImage } from "../utils/partImages";
 
 const router = Router();
 
@@ -180,7 +181,10 @@ router.get("/search", async (req: Request, res: Response) => {
       p.id,
       p.name,
       p.description,
-      p.image_url,
+      CASE
+        WHEN p.image_url LIKE 'data:image/%' THEN 'data:image/'
+        ELSE p.image_url
+      END AS image_url,
       p.user_id,
       p.price_ngn,
       p.stock_qty,
@@ -270,14 +274,28 @@ router.get("/search", async (req: Request, res: Response) => {
     role: roleFilter ?? undefined,
     userId: userIdFilter ?? undefined,
     category: categoryFilter || undefined,
-    results: rows.map((row) => ({
-      ...row,
-      userId: row.user_id,
-      vendorName: row.vendor_name,
-      priceNgn: row.price_ngn,
-      stockQty: row.stock_qty,
-    })),
+    results: rows.map((row) => {
+      const imageUrl = publicPartImageUrl(req, row.id, row.image_url);
+      return {
+        ...row,
+        image_url: imageUrl,
+        userId: row.user_id,
+        vendorName: row.vendor_name,
+        imageUrl,
+        priceNgn: row.price_ngn,
+        stockQty: row.stock_qty,
+      };
+    }),
   });
+});
+
+router.get("/:partId/image", async (req: Request, res: Response) => {
+  const { partId } = req.params;
+  const result = await query<{ image_url: string | null }>(
+    "SELECT image_url FROM parts WHERE id = $1 LIMIT 1",
+    [partId],
+  );
+  return sendPartImage(res, result.rows[0]?.image_url ?? null);
 });
 
 router.post("/", async (req: Request, res: Response) => {
@@ -359,7 +377,7 @@ router.post("/", async (req: Request, res: Response) => {
       userId: normalizedUserId,
       name: normalizedName,
       description: normalizedDescription || null,
-      imageUrl: normalizedImageUrl,
+      imageUrl: publicPartImageUrl(req, id, normalizedImageUrl),
       priceNgn: normalizedPriceNgn,
       stockQty: normalizedStockQty,
       role: normalizedRole,
@@ -614,7 +632,8 @@ router.patch("/:partId", async (req: Request, res: Response) => {
       ok: true,
       part: {
         ...part,
-        imageUrl: part.image_url,
+        image_url: publicPartImageUrl(req, part.id, part.image_url),
+        imageUrl: publicPartImageUrl(req, part.id, part.image_url),
         priceNgn: part.price_ngn,
         stockQty: part.stock_qty,
       },
@@ -1111,7 +1130,10 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
        COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name,
        p.name AS part_name,
        p.stock_qty,
-       p.image_url
+       CASE
+         WHEN p.image_url LIKE 'data:image/%' THEN 'data:image/'
+         ELSE p.image_url
+       END AS image_url
      FROM part_request_quotes q
      LEFT JOIN users u ON u.id = q.vendor_user_id
      LEFT JOIN parts p ON p.id = q.part_id
@@ -1155,7 +1177,9 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
       total: quote.price_ngn,
       currency: "NGN",
       stockQty: quote.stock_qty,
-      imageUrl: quote.image_url,
+      imageUrl: quote.part_id
+        ? publicPartImageUrl(req, quote.part_id, quote.image_url)
+        : null,
       status: quote.status,
       counterPriceNgn: quote.counter_price_ngn,
       counterNote: quote.counter_note,
@@ -1391,7 +1415,10 @@ router.get("/:partId", async (req: Request, res: Response) => {
          p.id,
          p.name,
          p.description,
-         p.image_url,
+         CASE
+           WHEN p.image_url LIKE 'data:image/%' THEN 'data:image/'
+           ELSE p.image_url
+         END AS image_url,
          p.user_id,
          COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name,
          p.price_ngn,
@@ -1415,7 +1442,17 @@ router.get("/:partId", async (req: Request, res: Response) => {
       role: string | null;
       created_at: string;
     }>(
-      `SELECT id, name, description, image_url, NULL::text AS vendor_name, role, created_at
+      `SELECT
+         id,
+         name,
+         description,
+         CASE
+           WHEN image_url LIKE 'data:image/%' THEN 'data:image/'
+           ELSE image_url
+         END AS image_url,
+         NULL::text AS vendor_name,
+         role,
+         created_at
        FROM parts
        WHERE id = $1`,
       [partId],
@@ -1437,9 +1474,10 @@ router.get("/:partId", async (req: Request, res: Response) => {
     ok: true,
     part: {
       ...part,
+      image_url: publicPartImageUrl(req, part.id, part.image_url),
       userId: part.user_id,
       vendorName: part.vendor_name,
-      imageUrl: part.image_url,
+      imageUrl: publicPartImageUrl(req, part.id, part.image_url),
       priceNgn: part.price_ngn,
       stockQty: part.stock_qty,
     },

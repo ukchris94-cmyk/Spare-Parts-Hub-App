@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { query, withClient } from "../db";
+import { publicPartImageUrl } from "../utils/partImages";
 
 const router = Router();
 
@@ -93,7 +94,15 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
     ).length;
 
     const { rows: partsRows } = await query<PartRow>(
-      `SELECT id, name, description, image_url, role
+      `SELECT
+         id,
+         name,
+         description,
+         CASE
+           WHEN image_url LIKE 'data:image/%' THEN 'data:image/'
+           ELSE image_url
+         END AS image_url,
+         role
        FROM parts
        ORDER BY created_at DESC
        LIMIT 8`
@@ -146,7 +155,8 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
       recommendations: {
         trendingParts: partsRows.map((part) => ({
           ...part,
-          imageUrl: part.image_url,
+          image_url: publicPartImageUrl(req, part.id, part.image_url),
+          imageUrl: publicPartImageUrl(req, part.id, part.image_url),
         })),
         quickService: {
           knownIssueParts: knownIssuePartNames.map((name) => ({
@@ -155,7 +165,8 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
           })),
           hotNewParts: hotNewParts.map((part) => ({
             ...part,
-            imageUrl: part.image_url,
+            image_url: publicPartImageUrl(req, part.id, part.image_url),
+            imageUrl: publicPartImageUrl(req, part.id, part.image_url),
           })),
         },
       },

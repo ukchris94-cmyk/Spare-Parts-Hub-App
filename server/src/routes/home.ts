@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { query, withClient } from "../db";
+import { publicPartImageUrl } from "../utils/partImages";
 
 const router = Router();
 
@@ -236,7 +237,14 @@ router.get("/user", async (req: Request, res: Response) => {
     let partsRows: PartRow[] = [];
     try {
       const partsResult = await query<PartRow>(
-        `SELECT id, name, description, image_url
+        `SELECT
+           id,
+           name,
+           description,
+           CASE
+             WHEN image_url LIKE 'data:image/%' THEN 'data:image/'
+             ELSE image_url
+           END AS image_url
          FROM parts
          ORDER BY created_at DESC
          LIMIT 8`
@@ -246,7 +254,14 @@ router.get("/user", async (req: Request, res: Response) => {
       if (!isDbColumnError(err)) throw err;
       log.warn({ err }, "Falling back to legacy parts query");
       const partsResult = await query<PartRow>(
-        `SELECT id, name, description, image_url
+        `SELECT
+           id,
+           name,
+           description,
+           CASE
+             WHEN image_url LIKE 'data:image/%' THEN 'data:image/'
+             ELSE image_url
+           END AS image_url
          FROM parts
          ORDER BY id DESC
          LIMIT 8`
@@ -265,7 +280,7 @@ router.get("/user", async (req: Request, res: Response) => {
       id: part.id,
       name: part.name,
       subtitle: part.description ?? "Top rated part",
-      imageUrl: part.image_url ?? undefined,
+      imageUrl: publicPartImageUrl(req, part.id, part.image_url) ?? undefined,
       query: part.name,
     }));
     const primaryVehicle =
