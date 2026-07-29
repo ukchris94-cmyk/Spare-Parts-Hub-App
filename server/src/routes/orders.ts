@@ -417,6 +417,15 @@ function mapDeliveryJob(row: DeliveryJobRow, dispatcherId?: string) {
   const isAvailable = row.delivery_status === "available" && !row.dispatcher_id;
   const items = Array.isArray(row.items) ? row.items : [];
   const { itemCount, orderSummary } = summarizeItems(items);
+  const dispatcherLatitude = readOptionalNumber(row.dispatcher_latest_latitude);
+  const dispatcherLongitude = readOptionalNumber(row.dispatcher_latest_longitude);
+  const hasActiveDispatcherLocation =
+    isAssignedToCurrentDispatcher &&
+    !DISPATCHER_HISTORY_STATUSES.includes(row.delivery_status) &&
+    dispatcherLatitude !== null &&
+    dispatcherLongitude !== null &&
+    isFiniteLatitude(dispatcherLatitude) &&
+    isFiniteLongitude(dispatcherLongitude);
 
   return {
     id: row.order_id,
@@ -465,6 +474,16 @@ function mapDeliveryJob(row: DeliveryJobRow, dispatcherId?: string) {
             contactPhone: row.dropoff_contact_phone,
           })
         : null,
+    dispatcherLocation: hasActiveDispatcherLocation
+      ? {
+          latitude: dispatcherLatitude,
+          longitude: dispatcherLongitude,
+          heading: readOptionalNumber(row.dispatcher_heading),
+          speed: readOptionalNumber(row.dispatcher_speed),
+          updatedAt: row.dispatcher_location_updated_at || null,
+          trackingStatus: row.tracking_status || "live",
+        }
+      : null,
     itemCount,
     orderSummary,
     items,
@@ -986,6 +1005,12 @@ router.get("/dispatcher/:dispatcherId/jobs", requireAuthenticated, async (req: R
        dj.dropoff_landmark,
        dj.dropoff_contact_name,
        dj.dropoff_contact_phone,
+       dj.dispatcher_latest_latitude,
+       dj.dispatcher_latest_longitude,
+       dj.dispatcher_location_updated_at,
+       dj.dispatcher_heading,
+       dj.dispatcher_speed,
+       dj.tracking_status,
        dj.issue_note,
        dj.failure_reason,
        o.items,
