@@ -34,6 +34,7 @@ const schema = z
     SMTP_HOST: z.string().trim().default("smtp.gmail.com"),
     SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(465),
     SMTP_SECURE: booleanString.default(true),
+    SMTP_FORCE_IPV4: booleanString.default(true),
     SMTP_USER: z.string().trim().optional(),
     SMTP_PASS: z.string().trim().optional(),
     SMTP_FROM: z.string().trim().optional(),

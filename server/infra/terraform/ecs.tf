@@ -40,6 +40,7 @@ locals {
     { name = "SMTP_HOST", value = "smtp.gmail.com" },
     { name = "SMTP_PORT", value = "465" },
     { name = "SMTP_SECURE", value = "true" },
+    { name = "SMTP_FORCE_IPV4", value = "true" },
     { name = "SMTP_FROM", value = var.email_from },
     { name = "CORS_ORIGINS", value = var.cors_origins },
     { name = "APP_DEEP_LINK_SCHEME", value = var.app_deep_link_scheme },

@@ -133,6 +133,13 @@ async function sendVerificationEmail(email: string, code: string): Promise<void>
   });
 }
 
+async function releaseVerificationCooldown(email: string): Promise<void> {
+  await query(
+    "UPDATE verification_codes SET last_sent_at = NOW() - INTERVAL '61 seconds' WHERE email = $1",
+    [email.toLowerCase()]
+  );
+}
+
 async function sendWelcomeEmail(email: string, firstName: string | null): Promise<void> {
   await sendTransactionalEmail({
     to: email,
@@ -188,6 +195,7 @@ router.post("/signup", emailLimiter, async (req: Request, res: Response) => {
   try {
     await sendVerificationEmail(body.email, code);
   } catch (error) {
+    await releaseVerificationCooldown(body.email).catch(() => undefined);
     req.log.error({ err: error, userId }, "Verification email delivery failed");
     res.status(503).json({
       ok: false,
@@ -229,7 +237,18 @@ router.post("/resend-code", emailLimiter, async (req: Request, res: Response) =>
     res.status(429).json({ ok: false, message: "Please wait before requesting another code." });
     return;
   }
-  await sendVerificationEmail(user.email, code);
+  try {
+    await sendVerificationEmail(user.email, code);
+  } catch (error) {
+    await releaseVerificationCooldown(user.email).catch(() => undefined);
+    req.log.error({ err: error, userId: user.id }, "Verification email resend failed");
+    res.status(503).json({
+      ok: false,
+      code: "EMAIL_DELIVERY_FAILED",
+      message: "The verification email could not be sent. Please try again shortly.",
+    });
+    return;
+  }
   res.json({ ok: true, message: "Verification code resent." });
 });
 
