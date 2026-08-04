@@ -77,9 +77,6 @@ const schema = z
         ["PUBLIC_API_URL", value.PUBLIC_API_URL],
         ["AWS_REGION", value.AWS_REGION],
         ["EMAIL_FROM", value.EMAIL_FROM],
-        ["MEDIA_BUCKET", value.MEDIA_BUCKET],
-        ["MEDIA_KMS_KEY_ID", value.MEDIA_KMS_KEY_ID],
-        ["PAYOUT_KMS_KEY_ID", value.PAYOUT_KMS_KEY_ID],
         ["GOOGLE_MAPS_SERVER_API_KEY", value.GOOGLE_MAPS_SERVER_API_KEY],
       ];
       for (const [name, configured] of required) {
@@ -99,6 +96,7 @@ const schema = z
           ["MONNIFY_CONTRACT_CODE", value.MONNIFY_CONTRACT_CODE],
           ["MONNIFY_REDIRECT_URL", value.MONNIFY_REDIRECT_URL],
           ["MONNIFY_WEBHOOK_IPS", value.MONNIFY_WEBHOOK_IPS],
+          ["PAYOUT_KMS_KEY_ID", value.PAYOUT_KMS_KEY_ID],
         ];
         for (const [name, configured] of paymentRequired) {
           if (!configured) {

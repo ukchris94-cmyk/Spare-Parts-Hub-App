@@ -16,7 +16,7 @@
     "migrate:prod": "node dist/db/migrate.js",
     "bootstrap-db-roles:prod": "node dist/scripts/bootstrap-database-roles.js",
     "promote-admin": "ts-node -r dotenv/config src/scripts/promote-admin.ts",
-    "create-admin": "ts-node -r dotenv/config src/scripts/create-admin.ts",
+    "create-admin": "npm run build && node dist/scripts/create-admin.js",
     "create-test-users": "ts-node -r dotenv/config src/scripts/create-test-users.ts",
     "send-test-push": "ts-node -r dotenv/config src/scripts/send-test-push.ts",
     "generate-password-hash": "ts-node -r dotenv/config src/scripts/generate-password-hash.ts",
