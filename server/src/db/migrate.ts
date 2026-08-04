@@ -53,7 +53,24 @@ async function main() {
         }
       : {}),
   };
-  const pool = new Pool(databaseConfig);
+  //const pool = new Pool(databaseConfig);
+  const useSsl = process.env.DB_SSL === "true";
+
+  const sslCaPath = process.env.DB_SSL_CA_PATH;
+  if (useSsl && !sslCaPath) {
+    throw new Error("DB_SSL_CA_PATH is required when DB_SSL=true");
+  }
+
+  const pool = new Pool({
+    connectionString,
+    ssl: useSsl
+      ? {
+          ca: readFileSync(sslCaPath!, "utf8"),
+          rejectUnauthorized: true,
+        }
+      : false,
+  });
+  
   const client = await pool.connect();
   try {
     await client.query("SELECT pg_advisory_lock($1)", [MIGRATION_LOCK_ID]);
