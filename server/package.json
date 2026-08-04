@@ -3,11 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "main": "dist/server.js",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/services/payments/fees.test.js dist/services/payments/monnify.test.js",
     "start": "node dist/server.js",
+    "worker": "node dist/worker.js",
     "migrate": "ts-node -r dotenv/config src/db/migrate.ts",
+    "migrate:prod": "node dist/db/migrate.js",
+    "bootstrap-db-roles:prod": "node dist/scripts/bootstrap-database-roles.js",
     "promote-admin": "ts-node -r dotenv/config src/scripts/promote-admin.ts",
     "create-admin": "ts-node -r dotenv/config src/scripts/create-admin.ts",
     "create-test-users": "ts-node -r dotenv/config src/scripts/create-test-users.ts",
@@ -16,24 +23,30 @@
     "geocode:legacy": "ts-node -r dotenv/config src/scripts/geocodeLegacyLocations.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.1101.0",
+    "@aws-sdk/client-s3": "^3.1101.0",
+    "@aws-sdk/client-sesv2": "^3.1101.0",
+    "@aws-sdk/client-sqs": "^3.1101.0",
+    "@aws-sdk/s3-request-presigner": "^3.1101.0",
     "@googlemaps/polyline-codec": "^1.0.28",
+    "@node-rs/argon2": "^2.0.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",
-    "express": "^4.21.0",
+    "express": "^5.2.1",
     "express-rate-limit": "^8.6.0",
-    "nodemailer": "^6.9.15",
+    "helmet": "^8.3.0",
     "pg": "^8.13.0",
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
-    "ts-node": "^10.9.2"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
-    "@types/express": "^4.17.21",
+    "@types/express": "^5.0.6",
     "@types/node": "^22.0.0",
-    "@types/nodemailer": "^7.0.11",
     "@types/pg": "^8.11.0",
     "pino-pretty": "^11.3.0",
+    "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.7.0"
   }

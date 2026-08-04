@@ -1,5 +1,6 @@
 import { PoolClient } from "pg";
 import { Request } from "express";
+import { randomUUID } from "crypto";
 import { query, withClient } from "../db";
 import { createNotification, notifyRole } from "./notifications";
 
@@ -49,7 +50,7 @@ type QuotePriceRow = {
 };
 
 export function genCheckoutId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}_${randomUUID()}`;
 }
 
 function toObjectItem(item: unknown): Record<string, any> {
@@ -125,12 +126,6 @@ function normalizeDeliveryLocation(value: unknown): Record<string, any> | undefi
   };
 }
 
-async function ensureBargainOfferColumns(client: DbClient): Promise<void> {
-  await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_price_ngn INTEGER");
-  await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ");
-  await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS used_order_id TEXT REFERENCES orders(id) ON DELETE SET NULL");
-}
-
 export async function normalizeCheckoutItems(
   client: DbClient,
   userId: string,
@@ -140,7 +135,6 @@ export async function normalizeCheckoutItems(
     throw new CheckoutOrderError(400, "At least one item is required.");
   }
 
-  await ensureBargainOfferColumns(client);
   const normalized: Record<string, any>[] = [];
 
   for (const rawItem of rawItems) {
@@ -296,6 +290,27 @@ export async function normalizeCheckoutItems(
     });
   }
 
+  const vendorIds = new Set(
+    normalized
+      .map((item) => requireString(item.vendorUserId))
+      .filter(Boolean)
+  );
+  if (vendorIds.size !== 1 || normalized.some((item) => !requireString(item.vendorUserId))) {
+    throw new CheckoutOrderError(
+      409,
+      vendorIds.size > 1
+        ? "Checkout items must come from one vendor. Place separate orders for each vendor."
+        : "One or more items are not assigned to an active vendor."
+    );
+  }
+
+  const deliveryLocations = new Set(
+    normalized.map((item) => JSON.stringify(item.deliveryLocation ?? null))
+  );
+  if (deliveryLocations.size !== 1) {
+    throw new CheckoutOrderError(400, "All items in an order must use the same delivery address.");
+  }
+
   return normalized;
 }
 
@@ -376,6 +391,15 @@ export async function notifyOrderCreated(
         .filter((partId: string | null): partId is string => partId !== null),
     ),
   );
+  const vendorUserIds = new Set(
+    input.items
+      .map((item: any) =>
+        typeof item?.vendorUserId === "string" && item.vendorUserId.trim()
+          ? item.vendorUserId.trim()
+          : null,
+      )
+      .filter((vendorId: string | null): vendorId is string => vendorId !== null),
+  );
 
   try {
     if (partIds.length > 0) {
@@ -383,21 +407,23 @@ export async function notifyOrderCreated(
         "SELECT DISTINCT user_id FROM parts WHERE id = ANY($1::text[]) AND user_id IS NOT NULL",
         [partIds],
       );
-      await Promise.all(
-        vendorRows
-          .filter((row): row is { user_id: string } => typeof row.user_id === "string")
-          .map((row) =>
-            createNotification({
-              recipientUserId: row.user_id,
-              recipientRole: "vendor",
-              type: "new_order",
-              title: "New order needs review",
-              message: "A customer placed a paid order containing one of your parts. Accept or reject it from Orders.",
-              relatedOrderId: input.orderId,
-            }),
-          ),
-      );
+      for (const row of vendorRows) {
+        if (typeof row.user_id === "string") vendorUserIds.add(row.user_id);
+      }
     }
+
+    await Promise.all(
+      Array.from(vendorUserIds).map((vendorId) =>
+        createNotification({
+          recipientUserId: vendorId,
+          recipientRole: "vendor",
+          type: "new_order",
+          title: "New order needs review",
+          message: "A customer placed a paid order containing one of your parts. Accept or reject it from Orders.",
+          relatedOrderId: input.orderId,
+        }),
+      ),
+    );
 
     await Promise.all([
       notifyRole("admin", {

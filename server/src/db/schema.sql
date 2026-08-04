@@ -181,6 +181,24 @@ CREATE TABLE IF NOT EXISTS part_requests (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS parts (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  description TEXT,
+  image_url   TEXT,
+  user_id     TEXT REFERENCES users(id) ON DELETE SET NULL,
+  price_ngn   INTEGER,
+  stock_qty   INTEGER,
+  role        TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS image_url TEXT;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS price_ngn INTEGER;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS stock_qty INTEGER;
+CREATE INDEX IF NOT EXISTS idx_parts_user ON parts (user_id);
+
 CREATE TABLE IF NOT EXISTS part_request_quotes (
   id               TEXT PRIMARY KEY,
   request_id       TEXT NOT NULL REFERENCES part_requests(id) ON DELETE CASCADE,
@@ -203,24 +221,6 @@ CREATE INDEX IF NOT EXISTS idx_part_request_quotes_request
 
 CREATE INDEX IF NOT EXISTS idx_part_request_quotes_vendor
   ON part_request_quotes (vendor_user_id, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS parts (
-  id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL,
-  description TEXT,
-  image_url   TEXT,
-  user_id     TEXT REFERENCES users(id) ON DELETE SET NULL,
-  price_ngn   INTEGER,
-  stock_qty   INTEGER,
-  role        TEXT,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-ALTER TABLE parts ADD COLUMN IF NOT EXISTS image_url TEXT;
-ALTER TABLE parts ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE SET NULL;
-ALTER TABLE parts ADD COLUMN IF NOT EXISTS price_ngn INTEGER;
-ALTER TABLE parts ADD COLUMN IF NOT EXISTS stock_qty INTEGER;
-CREATE INDEX IF NOT EXISTS idx_parts_user ON parts (user_id);
 
 CREATE TABLE IF NOT EXISTS onboarding_images (
   id            TEXT PRIMARY KEY,

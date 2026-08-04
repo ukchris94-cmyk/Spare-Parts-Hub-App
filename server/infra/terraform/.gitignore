@@ -1,0 +1,10 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+backend.hcl
+terraform.tfvars
+runtime-secrets.json
+migration-secrets.json
+crash.log
+

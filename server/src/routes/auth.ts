@@ -1,374 +1,247 @@
+import { createHash, createHmac, randomInt, randomUUID, timingSafeEqual } from "crypto";
 import { Request, Response, Router } from "express";
-import nodemailer from "nodemailer";
-import { createHash, randomBytes, scrypt, timingSafeEqual } from "crypto";
-import { promisify } from "util";
-import { query } from "../db";
-import { createAuthToken } from "../middleware/auth";
+import { rateLimit } from "express-rate-limit";
+import { z } from "zod";
+import { env } from "../config/env";
+import { pool, query } from "../db";
+import {
+  authenticateRequest,
+  createSessionTokens,
+  revokeAllUserSessions,
+  revokeRefreshToken,
+  revokeSession,
+  rotateRefreshToken,
+} from "../middleware/auth";
+import { sendTransactionalEmail } from "../services/email";
+import { hashPassword, verifyPassword } from "../services/passwords";
 
 const router = Router();
-const scryptAsync = promisify(scrypt);
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
+router.use(
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: env.isProduction ? 40 : 500,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    message: { ok: false, message: "Too many authentication requests. Please try again later." },
+  })
+);
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: env.isProduction ? 10 : 500,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: { ok: false, message: "Too many failed attempts. Please try again later." },
 });
 
-const fromEmail =
-  process.env.SMTP_FROM || process.env.SMTP_USER || "no-reply@example.com";
+const emailLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: env.isProduction ? 8 : 500,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { ok: false, message: "Too many email requests. Please try again later." },
+});
 
-function genId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+const emailSchema = z.string().trim().toLowerCase().email().max(254);
+const passwordSchema = z
+  .string()
+  .min(10, "Password must be at least 10 characters")
+  .max(128, "Password is too long");
+const signupSchema = z.object({
+  role: z.enum(["mechanic", "vendor", "dispatcher", "user"]),
+  email: emailSchema,
+  password: passwordSchema,
+  firstName: z.string().trim().max(80).optional(),
+  lastName: z.string().trim().max(80).optional(),
+  fullName: z.string().trim().max(160).optional(),
+  phone: z.string().trim().max(30).optional(),
+});
+
+function parseBody<T>(
+  schema: z.ZodType<T>,
+  req: Request,
+  res: Response
+): T | undefined {
+  const parsed = schema.safeParse(req.body);
+  if (parsed.success) return parsed.data;
+  res.status(400).json({
+    ok: false,
+    message: parsed.error.issues[0]?.message || "Invalid request",
+  });
+  return undefined;
 }
 
-function validatePassword(password: string): string | null {
-  if (!password || password.length < 8) return "Password must be at least 8 characters";
-  if (password.length > 128) return "Password is too long";
-  return null;
+function normalizeName(value?: string): string | null {
+  const trimmed = value?.trim().replace(/\s+/g, " ");
+  if (!trimmed) return null;
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
 }
 
-function isValidRole(role: string): boolean {
-  return ["mechanic", "vendor", "dispatcher", "user"].includes(role);
+function splitLegacyName(fullName?: string): { firstName: string | null; lastName: string | null } {
+  const normalized = fullName?.trim().replace(/\s+/g, " ");
+  if (!normalized) return { firstName: null, lastName: null };
+  const [first, ...rest] = normalized.split(" ");
+  return { firstName: normalizeName(first), lastName: normalizeName(rest.join(" ")) };
 }
 
-async function hashPassword(password: string): Promise<string> {
-  const salt = randomBytes(16).toString("hex");
-  const key = (await scryptAsync(password, salt, 64)) as Buffer;
-  return `scrypt:${salt}:${key.toString("hex")}`;
+function identifier(prefix: string): string {
+  return `${prefix}_${randomUUID()}`;
 }
 
-async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  const [algorithm, salt, expectedHex] = stored.split(":");
-  if (algorithm !== "scrypt" || !salt || !expectedHex) return false;
-  const derived = (await scryptAsync(password, salt, 64)) as Buffer;
-  const expected = Buffer.from(expectedHex, "hex");
-  if (derived.length !== expected.length) return false;
-  return timingSafeEqual(derived, expected);
-}
-
-function hashResetToken(token: string): string {
+function hashOpaqueToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function isDbColumnError(err: unknown): boolean {
-  return (
-    !!err &&
-    typeof err === "object" &&
-    "code" in err &&
-    (err as { code?: string }).code === "42703"
+function verificationCodeHash(email: string, code: string): string {
+  const secret = env.AUTH_TOKEN_SECRET || "quickserve-development-verification-secret";
+  return createHmac("sha256", secret).update(`${email}:${code}`).digest("hex");
+}
+
+function secureEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+async function issueVerificationCode(email: string, enforceCooldown: boolean): Promise<string | null> {
+  const code = randomInt(100_000, 1_000_000).toString();
+  const codeHash = verificationCodeHash(email, code);
+  const result = await query(
+    `INSERT INTO verification_codes
+       (email, code, code_hash, expires_at, attempt_count, last_sent_at, created_at)
+     VALUES ($1, NULL, $2, NOW() + INTERVAL '10 minutes', 0, NOW(), NOW())
+     ON CONFLICT (email) DO UPDATE
+       SET code = NULL,
+           code_hash = EXCLUDED.code_hash,
+           expires_at = EXCLUDED.expires_at,
+           attempt_count = 0,
+           last_sent_at = NOW()
+     ${enforceCooldown ? "WHERE verification_codes.last_sent_at < NOW() - INTERVAL '60 seconds'" : ""}`,
+    [email, codeHash]
   );
+  return result.rowCount > 0 ? code : null;
 }
 
-function isUniqueViolationError(err: unknown): boolean {
-  return (
-    !!err &&
-    typeof err === "object" &&
-    "code" in err &&
-    (err as { code?: string }).code === "23505"
-  );
-}
-
-function normalizeFirstName(value?: string): string | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const firstToken = trimmed.split(/\s+/)[0] ?? "";
-  if (!firstToken) return null;
-  return firstToken;
-}
-
-async function ensureWelcomeEmailColumn(): Promise<void> {
-  await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_sent_at TIMESTAMPTZ");
-}
-
-type VerificationUserRow = {
-  id: string;
-  email: string;
-  first_name: string | null;
-  verified: boolean;
-  welcome_email_sent_at: string | null;
-};
-
-async function loadVerificationUser(normalizedEmail: string): Promise<VerificationUserRow | null> {
-  try {
-    const { rows } = await query<VerificationUserRow>(
-      `SELECT id, email, first_name, verified, welcome_email_sent_at
-       FROM users
-       WHERE LOWER(email) = $1
-       LIMIT 1`,
-      [normalizedEmail]
-    );
-    return rows[0] ?? null;
-  } catch (err) {
-    if (!isDbColumnError(err)) throw err;
-    await ensureWelcomeEmailColumn();
-    const { rows } = await query<VerificationUserRow>(
-      `SELECT id, email, first_name, verified, welcome_email_sent_at
-       FROM users
-       WHERE LOWER(email) = $1
-       LIMIT 1`,
-      [normalizedEmail]
-    );
-    return rows[0] ?? null;
-  }
-}
-
-async function sendWelcomeEmailAfterVerification(params: {
-  userId: string;
-  email: string;
-  firstName: string | null;
-  log: Request["log"];
-}): Promise<boolean> {
-  const { userId, email, firstName, log } = params;
-  const greeting = firstName ? `Hi ${firstName},` : "Hi there,";
-
-  await transporter.sendMail({
-    from: fromEmail,
+async function sendVerificationEmail(email: string, code: string): Promise<void> {
+  await sendTransactionalEmail({
     to: email,
-    subject: "Welcome to Spare Parts Hub",
-    text: [
-      greeting,
-      "",
-      "Welcome to Spare Parts Hub. Your email has been verified and your account is active.",
-      "",
-      "You can now browse available parts, connect with vendors, track orders, and manage your spare-parts workflow based on your account type.",
-      "",
-      "Next steps:",
-      "- Complete your profile in the app.",
-      "- Browse parts or manage your shop workflow based on your account type.",
-      "- Use the Help/FAQs area in the app if you need support.",
-      "",
-      "If you did not create this account, contact support through the app.",
-    ].join("\n"),
+    subject: "Your QuickServe verification code",
+    text: `Your QuickServe verification code is ${code}. It expires in 10 minutes. Never share this code with anyone.`,
+    template: "email-verification",
   });
-
-  try {
-    await ensureWelcomeEmailColumn();
-    await query(
-      "UPDATE users SET welcome_email_sent_at = NOW() WHERE id = $1 AND welcome_email_sent_at IS NULL",
-      [userId]
-    );
-  } catch (err) {
-    log.warn({ err, userId }, "Welcome email sent but timestamp update failed");
-  }
-
-  return true;
 }
 
-router.post("/signup", async (req: Request, res: Response) => {
-  const log = req.log;
-  const { role, email, password, firstName, fullName, phone } = req.body as {
-    role?: string;
-    email?: string;
-    password?: string;
-    firstName?: string;
-    lastName?: string;
-    fullName?: string;
-    phone?: string;
-  };
+async function sendWelcomeEmail(email: string, firstName: string | null): Promise<void> {
+  await sendTransactionalEmail({
+    to: email,
+    subject: "Welcome to QuickServe",
+    text: [
+      firstName ? `Hi ${firstName},` : "Hi there,",
+      "",
+      "Your email is verified and your QuickServe account is active.",
+      "",
+      "If you did not create this account, contact QuickServe support immediately.",
+    ].join("\n"),
+    template: "welcome",
+  });
+}
 
-  if (!email || !role || !password) {
-    log.warn({ email: !!email, role: !!role, password: !!password }, "Signup missing fields");
-    return res.status(400).json({
-      ok: false,
-      message: "Missing required fields: email, role or password",
-    });
-  }
+router.post("/signup", emailLimiter, async (req: Request, res: Response) => {
+  const body = parseBody(signupSchema, req, res);
+  if (!body) return;
 
-  const normalizedEmail = email.toLowerCase().trim();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-    log.warn({ email: normalizedEmail }, "Signup invalid email format");
-    return res.status(400).json({ ok: false, message: "Invalid email format" });
-  }
-
-  const normalizedRole = String(role).toLowerCase().trim();
-  if (!normalizedRole || !isValidRole(normalizedRole)) {
-    return res.status(400).json({ ok: false, message: "Invalid role" });
-  }
-  const normalizedFirstName =
-    normalizeFirstName(firstName) ?? normalizeFirstName(fullName);
-  const normalizedLastName =
-    typeof req.body?.lastName === "string" && req.body.lastName.trim()
-      ? req.body.lastName.trim()
-      : typeof fullName === "string" && fullName.trim().includes(" ")
-        ? fullName.trim().replace(/^\S+\s+/, "").trim() || null
-        : null;
-  const normalizedPhone = typeof phone === "string" && phone.trim() ? phone.trim() : null;
-  const passwordError = validatePassword(password);
-  if (passwordError) {
-    return res.status(400).json({ ok: false, message: passwordError });
-  }
+  const legacyName = splitLegacyName(body.fullName);
+  const firstName = normalizeName(body.firstName) ?? legacyName.firstName;
+  const lastName = normalizeName(body.lastName) ?? legacyName.lastName;
+  const userId = identifier("usr");
+  const passwordHash = await hashPassword(body.password);
 
   try {
-    const existing = await query<{ id: string; verified: boolean }>(
-      "SELECT id, verified FROM users WHERE LOWER(email) = $1 LIMIT 1",
-      [normalizedEmail]
-    );
-    const existingUser = existing.rows[0];
-    if (existingUser) {
-      return res.status(409).json({
-        ok: false,
-        code: existingUser.verified ? "ACCOUNT_EXISTS" : "ACCOUNT_UNVERIFIED",
-        message: existingUser.verified
-          ? "Account already exists. Please log in."
-          : "Account already exists but is not verified. Please log in and tap Verify now to resend a code.",
-      });
-    }
-    const userId = genId("usr");
-    const passwordHash = await hashPassword(password);
-    try {
-      await query("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT");
-      await query(
-        "INSERT INTO users (id, first_name, last_name, phone, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)",
-        [
-          userId,
-          normalizedFirstName,
-          normalizedLastName,
-          normalizedPhone,
-          normalizedEmail,
-          passwordHash,
-          normalizedRole,
-        ]
-      );
-    } catch (err) {
-      if (isUniqueViolationError(err)) {
-        return res.status(409).json({
-          ok: false,
-          code: "ACCOUNT_EXISTS",
-          message: "Account already exists. Please log in.",
-        });
-      }
-      if (!isDbColumnError(err)) throw err;
-      try {
-        await query(
-          "INSERT INTO users (id, email, password_hash, role, verified) VALUES ($1, $2, $3, $4, FALSE)",
-          [userId, normalizedEmail, passwordHash, normalizedRole]
-        );
-      } catch (legacyErr) {
-        if (isUniqueViolationError(legacyErr)) {
-          return res.status(409).json({
-            ok: false,
-            code: "ACCOUNT_EXISTS",
-            message: "Account already exists. Please log in.",
-          });
-        }
-        throw legacyErr;
-      }
-    }
-    log.info({ userId, email: normalizedEmail, role: normalizedRole }, "User created");
-
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     await query(
-      `INSERT INTO verification_codes (email, code, expires_at) VALUES ($1, $2, $3)
-       ON CONFLICT (email) DO UPDATE SET code = $2, expires_at = $3`,
-      [normalizedEmail, code, expiresAt]
+      `INSERT INTO users
+         (id, first_name, last_name, phone, email, password_hash, role, verified)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)`,
+      [userId, firstName, lastName, body.phone || null, body.email, passwordHash, body.role]
     );
-
-    await transporter.sendMail({
-      from: fromEmail,
-      to: normalizedEmail,
-      subject: "Your SpareParts Hub verification code",
-      text: `Your verification code is ${code}. It expires in 10 minutes.`,
-    });
-    log.info({ email: normalizedEmail }, "Verification email sent");
-
-  } catch (err) {
-    log.error({ err, email: normalizedEmail }, "Signup failed");
-    if (String(err).includes("nodemailer") || String(err).includes("sendMail")) {
-      return res.status(500).json({
+  } catch (error) {
+    if ((error as { code?: string }).code === "23505") {
+      const existing = await query<{ verified: boolean }>(
+        "SELECT verified FROM users WHERE LOWER(email) = $1 LIMIT 1",
+        [body.email]
+      );
+      res.status(409).json({
         ok: false,
-        message: "Could not send verification email",
+        code: existing.rows[0]?.verified ? "ACCOUNT_EXISTS" : "ACCOUNT_UNVERIFIED",
+        message: existing.rows[0]?.verified
+          ? "Account already exists. Please log in."
+          : "Account already exists but is not verified. Request a new verification code.",
       });
+      return;
     }
-    throw err;
+    throw error;
   }
 
-  return res.status(201).json({
+  const code = await issueVerificationCode(body.email, false);
+  if (!code) throw new Error("Could not create verification code");
+  try {
+    await sendVerificationEmail(body.email, code);
+  } catch (error) {
+    req.log.error({ err: error, userId }, "Verification email delivery failed");
+    res.status(503).json({
+      ok: false,
+      code: "EMAIL_DELIVERY_FAILED",
+      message: "Your account was created, but the verification email could not be sent. Try resend shortly.",
+    });
+    return;
+  }
+
+  req.log.info({ userId, role: body.role }, "User account created");
+  res.status(201).json({
     ok: true,
     message: "Account created. Verification code sent.",
-    role: normalizedRole,
-    email: normalizedEmail,
+    role: body.role,
+    email: body.email,
   });
 });
 
-router.post("/resend-code", async (req: Request, res: Response) => {
-  const log = req.log;
-  const { email } = req.body as { email?: string };
+router.post("/resend-code", emailLimiter, async (req: Request, res: Response) => {
+  const body = parseBody(z.object({ email: emailSchema }), req, res);
+  if (!body) return;
 
-  if (!email) {
-    return res.status(400).json({ ok: false, message: "Email is required" });
+  const userResult = await query<{ id: string; email: string; verified: boolean }>(
+    "SELECT id, email, verified FROM users WHERE LOWER(email) = $1 AND deleted_at IS NULL LIMIT 1",
+    [body.email]
+  );
+  const user = userResult.rows[0];
+  if (!user) {
+    res.json({ ok: true, message: "If the account is eligible, a verification code was sent." });
+    return;
+  }
+  if (user.verified) {
+    res.status(409).json({ ok: false, code: "ACCOUNT_ALREADY_VERIFIED", message: "This account is already verified. Please log in." });
+    return;
   }
 
-  const normalized = email.toLowerCase().trim();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
-    return res.status(400).json({ ok: false, message: "Invalid email format" });
+  const code = await issueVerificationCode(user.email.toLowerCase(), true);
+  if (!code) {
+    res.status(429).json({ ok: false, message: "Please wait before requesting another code." });
+    return;
   }
-
-  try {
-    const { rows } = await query<{ id: string; verified: boolean; email: string }>(
-      "SELECT id, verified, email FROM users WHERE LOWER(email) = $1 LIMIT 1",
-      [normalized]
-    );
-    const user = rows[0];
-
-    if (!user) {
-      return res.status(404).json({
-        ok: false,
-        code: "ACCOUNT_NOT_FOUND",
-        message: "No account found for this email. Please create an account first.",
-      });
-    }
-
-    if (user.verified) {
-      return res.status(409).json({
-        ok: false,
-        code: "ACCOUNT_ALREADY_VERIFIED",
-        message: "This account is already verified. Please log in.",
-      });
-    }
-
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    await query(
-      `INSERT INTO verification_codes (email, code, expires_at) VALUES ($1, $2, $3)
-       ON CONFLICT (email) DO UPDATE SET code = $2, expires_at = $3`,
-      [normalized, code, expiresAt]
-    );
-    await transporter.sendMail({
-      from: fromEmail,
-      to: user.email,
-      subject: "Your SpareParts Hub verification code",
-      text: `Your new verification code is ${code}. It expires in 10 minutes.`,
-    });
-    log.info({ email: normalized, userId: user.id }, "Verification code resent");
-  } catch (err) {
-    log.error({ err, email: normalized }, "Resend verification email failed");
-    return res.status(500).json({
-      ok: false,
-      message: "Could not resend verification email",
-    });
-  }
-
-  return res.json({
-    ok: true,
-    message: "Verification code resent.",
-  });
+  await sendVerificationEmail(user.email, code);
+  res.json({ ok: true, message: "Verification code resent." });
 });
 
+router.post("/login", loginLimiter, async (req: Request, res: Response) => {
+  const body = parseBody(
+    z.object({ email: emailSchema, password: z.string().min(1).max(128) }),
+    req,
+    res
+  );
+  if (!body) return;
 
-router.post("/login", async (req: Request, res: Response) => {
-  const log = req.log;
-  const { email, password } = req.body as { email?: string; password?: string };
-
-  if (!email || !password) {
-    return res.status(400).json({ ok: false, message: "Email and password are required" });
-  }
-
-  const normalizedEmail = email.toLowerCase().trim();
-  type LoginUserRow = {
+  const result = await query<{
     id: string;
     first_name: string | null;
     last_name: string | null;
@@ -376,60 +249,39 @@ router.post("/login", async (req: Request, res: Response) => {
     role: string;
     verified: boolean;
     password_hash: string | null;
-  };
-  let rows: LoginUserRow[] = [];
-  try {
-    const result = await query<LoginUserRow>(
-      "SELECT id, first_name, last_name, email, role, verified, password_hash FROM users WHERE LOWER(email) = $1",
-      [normalizedEmail]
-    );
-    rows = result.rows;
-  } catch (err) {
-    if (!isDbColumnError(err)) throw err;
-    const result = await query<{
-      id: string;
-      email: string;
-      role: string;
-      verified: boolean;
-      password_hash: string | null;
-    }>(
-      "SELECT id, email, role, verified, password_hash FROM users WHERE LOWER(email) = $1",
-      [normalizedEmail]
-    );
-    rows = result.rows.map((row) => ({
-      ...row,
-      first_name: null,
-      last_name: null,
-    }));
-  }
-  const user = rows[0];
-
-  if (!user || !user.password_hash) {
-    log.warn({ email: normalizedEmail }, "Login failed: user not found");
-    return res
-      .status(401)
-      .json({ ok: false, message: "Invalid login credentials" });
+  }>(
+    `SELECT id, first_name, last_name, email, role, verified, password_hash
+     FROM users
+     WHERE LOWER(email) = $1 AND deleted_at IS NULL AND deletion_requested_at IS NULL
+     LIMIT 1`,
+    [body.email]
+  );
+  const user = result.rows[0];
+  if (!user?.password_hash) {
+    res.status(401).json({ ok: false, message: "Invalid login credentials" });
+    return;
   }
 
-  const isPasswordValid = await verifyPassword(password, user.password_hash);
-  if (!isPasswordValid) {
-    log.warn({ email: normalizedEmail }, "Login failed: wrong password");
-    return res
-      .status(401)
-      .json({ ok: false, message: "Invalid login credentials" });
+  const password = await verifyPassword(body.password, user.password_hash);
+  if (!password.valid) {
+    res.status(401).json({ ok: false, message: "Invalid login credentials" });
+    return;
   }
-
   if (!user.verified) {
-    return res.status(403).json({
-      ok: false,
-      message: "Please verify your email before logging in",
-    });
+    res.status(403).json({ ok: false, message: "Please verify your email before logging in" });
+    return;
   }
 
-  const token = createAuthToken(user.id);
-  log.info({ userId: user.id, email: user.email }, "Login success");
+  if (password.needsRehash) {
+    await query(
+      "UPDATE users SET password_hash = $1, password_updated_at = NOW() WHERE id = $2",
+      [await hashPassword(body.password), user.id]
+    );
+  }
 
-  return res.json({
+  const tokens = await createSessionTokens(user.id, req);
+  req.log.info({ userId: user.id }, "Login successful");
+  res.json({
     ok: true,
     message: "Login success",
     userId: user.id,
@@ -437,207 +289,205 @@ router.post("/login", async (req: Request, res: Response) => {
     lastName: user.last_name ?? undefined,
     email: user.email,
     role: user.role,
-    token,
+    token: tokens.accessToken,
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
+    expiresIn: tokens.expiresIn,
   });
 });
 
-router.post("/forgot-password", async (req: Request, res: Response) => {
-  const log = req.log;
-  const { email } = req.body as { email?: string };
-
-  if (!email) {
-    return res.status(400).json({ ok: false, message: "Email is required" });
+router.post("/refresh", loginLimiter, async (req: Request, res: Response) => {
+  const body = parseBody(z.object({ refreshToken: z.string().min(20).max(512) }), req, res);
+  if (!body) return;
+  const tokens = await rotateRefreshToken(body.refreshToken, req);
+  if (!tokens) {
+    res.status(401).json({ ok: false, message: "Invalid or expired refresh token" });
+    return;
   }
+  res.json({ ok: true, token: tokens.accessToken, ...tokens });
+});
 
-  const normalizedEmail = email.toLowerCase().trim();
+router.post("/logout", async (req: Request, res: Response) => {
+  const user = await authenticateRequest(req);
+  const refreshToken = typeof req.body?.refreshToken === "string" ? req.body.refreshToken : undefined;
+  await Promise.all([revokeSession(user?.sessionId), revokeRefreshToken(refreshToken)]);
+  res.status(204).send();
+});
+
+router.post("/forgot-password", emailLimiter, async (req: Request, res: Response) => {
+  const body = parseBody(z.object({ email: emailSchema }), req, res);
+  if (!body) return;
   const genericResponse = {
     ok: true,
-    message:
-      "If an account with that email exists, a password reset token has been sent.",
+    message: "If an account with that email exists, password reset instructions were sent.",
   };
 
+  const result = await query<{ id: string; email: string }>(
+    "SELECT id, email FROM users WHERE LOWER(email) = $1 AND deleted_at IS NULL AND deletion_requested_at IS NULL LIMIT 1",
+    [body.email]
+  );
+  const user = result.rows[0];
+  if (!user) {
+    res.json(genericResponse);
+    return;
+  }
+
+  const rawToken = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
+  await query(
+    `INSERT INTO password_reset_tokens (email, token_hash, expires_at)
+     VALUES ($1, $2, NOW() + INTERVAL '15 minutes')
+     ON CONFLICT (email) DO UPDATE
+       SET token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
+    [body.email, hashOpaqueToken(rawToken)]
+  );
+  const resetLink = `${env.APP_DEEP_LINK_SCHEME}://reset-password?email=${encodeURIComponent(body.email)}&token=${encodeURIComponent(rawToken)}`;
+  await sendTransactionalEmail({
+    to: user.email,
+    subject: "Reset your QuickServe password",
+    text: `Open this link to reset your QuickServe password: ${resetLink}\n\nThis one-time link expires in 15 minutes. If you did not request it, ignore this email.`,
+    template: "password-reset",
+  });
+  res.json(genericResponse);
+});
+
+router.post("/reset-password", loginLimiter, async (req: Request, res: Response) => {
+  const body = parseBody(
+    z.object({ email: emailSchema, token: z.string().min(32).max(256), newPassword: passwordSchema }),
+    req,
+    res
+  );
+  if (!body) return;
+
+  const suppliedHash = hashOpaqueToken(body.token.trim());
+  const client = await pool.connect();
+  let userId: string | undefined;
   try {
-    const { rows } = await query<{
+    await client.query("BEGIN");
+    const tokenResult = await client.query<{ token_hash: string }>(
+      `SELECT token_hash FROM password_reset_tokens
+       WHERE email = $1 AND expires_at > NOW()
+       FOR UPDATE`,
+      [body.email]
+    );
+    const expectedHash = tokenResult.rows[0]?.token_hash;
+    if (!expectedHash || !secureEqual(expectedHash, suppliedHash)) {
+      await client.query("ROLLBACK");
+      res.status(400).json({ ok: false, message: "Invalid or expired reset token" });
+      return;
+    }
+
+    const update = await client.query<{ id: string }>(
+      `UPDATE users
+       SET password_hash = $1, password_updated_at = NOW(), token_version = token_version + 1
+       WHERE LOWER(email) = $2 AND deleted_at IS NULL
+       RETURNING id`,
+      [await hashPassword(body.newPassword), body.email]
+    );
+    userId = update.rows[0]?.id;
+    if (!userId) {
+      await client.query("ROLLBACK");
+      res.status(400).json({ ok: false, message: "Invalid or expired reset token" });
+      return;
+    }
+    await client.query("DELETE FROM password_reset_tokens WHERE email = $1", [body.email]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+  await revokeAllUserSessions(userId);
+  res.json({ ok: true, message: "Password reset successful. Please log in again." });
+});
+
+async function handleVerifyEmail(req: Request, res: Response): Promise<void> {
+  const body = parseBody(
+    z.object({ email: emailSchema, code: z.string().regex(/^\d{6}$/, "Enter the 6-digit code") }),
+    req,
+    res
+  );
+  if (!body) return;
+
+  const client = await pool.connect();
+  let user: { id: string; email: string; first_name: string | null; verified: boolean; welcome_email_sent_at: Date | null } | undefined;
+  try {
+    await client.query("BEGIN");
+    const userResult = await client.query<{
       id: string;
       email: string;
+      first_name: string | null;
       verified: boolean;
-      password_hash: string | null;
+      welcome_email_sent_at: Date | null;
     }>(
-      "SELECT id, email, verified, password_hash FROM users WHERE LOWER(email) = $1 LIMIT 1",
-      [normalizedEmail]
+      `SELECT id, email, first_name, verified, welcome_email_sent_at
+       FROM users WHERE LOWER(email) = $1 AND deleted_at IS NULL FOR UPDATE`,
+      [body.email]
     );
-    const user = rows[0];
-
+    user = userResult.rows[0];
     if (!user) {
-      log.info({ email: normalizedEmail }, "Forgot password requested for unknown email");
-      return res.json(genericResponse);
+      await client.query("ROLLBACK");
+      res.status(400).json({ ok: false, message: "Invalid or expired verification code" });
+      return;
+    }
+    if (user.verified) {
+      await client.query("DELETE FROM verification_codes WHERE email = $1", [body.email]);
+      await client.query("COMMIT");
+      res.status(409).json({ ok: false, message: "This account is already verified. Please log in." });
+      return;
     }
 
-    const rawToken = randomBytes(24).toString("base64url");
-    const tokenHash = hashResetToken(rawToken);
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-    const resetLink = `sparepartshubmobileclean://reset-password?email=${encodeURIComponent(normalizedEmail)}&token=${encodeURIComponent(rawToken)}`;
-
-    await query(
-      `INSERT INTO password_reset_tokens (email, token_hash, expires_at)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (email) DO UPDATE SET token_hash = $2, expires_at = $3, created_at = NOW()`,
-      [normalizedEmail, tokenHash, expiresAt]
+    const codeResult = await client.query<{ code_hash: string | null; attempt_count: number }>(
+      `UPDATE verification_codes
+       SET attempt_count = attempt_count + 1
+       WHERE email = $1 AND expires_at > NOW() AND attempt_count < 5
+       RETURNING code_hash, attempt_count`,
+      [body.email]
     );
-
-    await transporter.sendMail({
-      from: fromEmail,
-      to: user.email,
-      subject: "Reset your SpareParts Hub password",
-      text:
-        `Tap this link to reset your password: ${resetLink}\n\n` +
-        `Or enter this token manually in the app: ${rawToken}\n` +
-        `This token expires in 15 minutes.`,
-    });
-    log.info({ email: normalizedEmail }, "Password reset token sent");
-    return res.json(genericResponse);
-  } catch (err) {
-    log.error({ err, email: normalizedEmail }, "Forgot password failed");
-    return res
-      .status(500)
-      .json({ ok: false, message: "Could not process password reset request" });
-  }
-});
-
-router.post("/reset-password", async (req: Request, res: Response) => {
-  const log = req.log;
-  const { email, token, newPassword } = req.body as {
-    email?: string;
-    token?: string;
-    newPassword?: string;
-  };
-
-  if (!email || !token || !newPassword) {
-    return res.status(400).json({
-      ok: false,
-      message: "Email, token, and newPassword are required",
-    });
-  }
-
-  const passwordError = validatePassword(newPassword);
-  if (passwordError) {
-    return res.status(400).json({ ok: false, message: passwordError });
-  }
-
-  const normalizedEmail = email.toLowerCase().trim();
-  const tokenHash = hashResetToken(token.trim());
-
-  try {
-    const { rows } = await query<{ token_hash: string }>(
-      `SELECT token_hash
-       FROM password_reset_tokens
-       WHERE email = $1 AND expires_at > NOW()
-       LIMIT 1`,
-      [normalizedEmail]
+    const codeRow = codeResult.rows[0];
+    const valid = !!codeRow?.code_hash && secureEqual(
+      codeRow.code_hash,
+      verificationCodeHash(body.email, body.code)
     );
-    const resetRow = rows[0];
-    if (!resetRow) {
-      return res
-        .status(400)
-        .json({ ok: false, message: "Invalid or expired reset token" });
+    if (!valid) {
+      await client.query("COMMIT");
+      res.status(400).json({ ok: false, message: "Invalid or expired verification code" });
+      return;
     }
 
-    const expected = Buffer.from(resetRow.token_hash, "hex");
-    const provided = Buffer.from(tokenHash, "hex");
-    if (
-      expected.length !== provided.length ||
-      !timingSafeEqual(expected, provided)
-    ) {
-      return res
-        .status(400)
-        .json({ ok: false, message: "Invalid or expired reset token" });
-    }
-
-    const passwordHash = await hashPassword(newPassword);
-    const updateResult = await query(
-      "UPDATE users SET password_hash = $1 WHERE LOWER(email) = $2",
-      [passwordHash, normalizedEmail]
-    );
-    await query("DELETE FROM password_reset_tokens WHERE email = $1", [
-      normalizedEmail,
-    ]);
-
-    if (!updateResult.rowCount) {
-      return res.status(404).json({ ok: false, message: "User not found" });
-    }
-
-    log.info({ email: normalizedEmail }, "Password reset successful");
-    return res.json({ ok: true, message: "Password reset successful" });
-  } catch (err) {
-    log.error({ err, email: normalizedEmail }, "Reset password failed");
-    return res.status(500).json({ ok: false, message: "Could not reset password" });
+    await client.query("UPDATE users SET verified = TRUE WHERE id = $1", [user.id]);
+    await client.query("DELETE FROM verification_codes WHERE email = $1", [body.email]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
   }
-});
-
-async function handleVerifyEmail(req: Request, res: Response) {
-  const log = req.log;
-  const { email, code } = req.body as { email?: string; code?: string };
-
-  if (!email || !code) {
-    return res
-      .status(400)
-      .json({ ok: false, message: "Email and code are required" });
-  }
-
-  const normalized = email.toLowerCase().trim();
-  const user = await loadVerificationUser(normalized);
-
-  if (!user) {
-    return res.status(404).json({ ok: false, message: "No account found for this email" });
-  }
-  if (user.verified) {
-    await query("DELETE FROM verification_codes WHERE email = $1", [normalized]);
-    return res.status(409).json({ ok: false, message: "This account is already verified. Please log in." });
-  }
-
-  const { rows: codeRows } = await query<{ code: string }>(
-    "SELECT code FROM verification_codes WHERE email = $1 AND expires_at > NOW()",
-    [normalized]
-  );
-  const expected = codeRows[0]?.code;
-
-  if (!expected || expected !== code) {
-    log.warn({ email: normalized }, "Verify failed: invalid or expired code");
-    return res
-      .status(400)
-      .json({ ok: false, message: "Invalid or expired verification code" });
-  }
-
-  await query("DELETE FROM verification_codes WHERE email = $1", [normalized]);
-  await query("UPDATE users SET verified = TRUE WHERE id = $1", [user.id]);
-  log.info({ email: normalized, userId: user.id }, "Email verified");
 
   let welcomeEmailSent = false;
-  if (!user.welcome_email_sent_at) {
+  if (user && !user.welcome_email_sent_at) {
     try {
-      welcomeEmailSent = await sendWelcomeEmailAfterVerification({
-        userId: user.id,
-        email: user.email,
-        firstName: user.first_name,
-        log,
-      });
-      log.info({ email: normalized, userId: user.id }, "Welcome email sent after verification");
-    } catch (welcomeErr) {
-      log.warn({ err: welcomeErr, email: normalized, userId: user.id }, "Welcome email failed after verification");
+      await sendWelcomeEmail(user.email, user.first_name);
+      await query(
+        "UPDATE users SET welcome_email_sent_at = NOW() WHERE id = $1 AND welcome_email_sent_at IS NULL",
+        [user.id]
+      );
+      welcomeEmailSent = true;
+    } catch (error) {
+      req.log.warn({ err: error, userId: user.id }, "Welcome email delivery failed");
     }
   }
 
-  return res.json({
+  res.json({
     ok: true,
-    message: welcomeEmailSent
-      ? "Email verified successfully. Your account is active and your welcome email has been sent."
-      : "Email verified successfully. Your account is active.",
-    email: normalized,
+    message: "Email verified successfully. Your account is active.",
+    email: body.email,
     welcomeEmailSent,
   });
 }
 
-router.post("/verify", handleVerifyEmail);
-router.post("/verify-email", handleVerifyEmail);
+router.post("/verify", loginLimiter, handleVerifyEmail);
+router.post("/verify-email", loginLimiter, handleVerifyEmail);
 
 export default router;

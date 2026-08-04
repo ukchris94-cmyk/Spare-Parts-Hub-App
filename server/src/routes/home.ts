@@ -1,11 +1,21 @@
 import { Router, Request, Response } from "express";
+import { randomUUID } from "crypto";
 import { query, withClient } from "../db";
+import { requireAuthenticated } from "../middleware/auth";
 import { publicPartImageUrl } from "../utils/partImages";
 
 const router = Router();
+router.use(requireAuthenticated);
+
+function resolveRequestedUserId(req: Request, value: unknown): string | null {
+  const requested = typeof value === "string" ? value.trim() : "";
+  if (!requested || requested === req.user?.id) return req.user?.id || null;
+  if (["admin", "staff"].includes(req.user?.role || "")) return requested;
+  return null;
+}
 
 function genId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}_${randomUUID()}`;
 }
 
 type UserRow = {
@@ -139,73 +149,28 @@ function fallbackHomePayload() {
   };
 }
 
-async function resolveUserId(requestedUserId?: string): Promise<string | null> {
-  if (requestedUserId) {
-    const userResult = await query<UserRow>(
-      "SELECT id, first_name, last_name, email, role FROM users WHERE id = $1",
-      [requestedUserId]
-    );
-    return userResult.rows[0]?.id ?? null;
-  }
-
-  try {
-    const userResult = await query<UserRow>(
-      "SELECT id, first_name, last_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
-    );
-    return userResult.rows[0]?.id ?? null;
-  } catch (err) {
-    if (!isDbColumnError(err)) throw err;
-    const userResult = await query<UserRow>(
-      "SELECT id, first_name, last_name, email, role FROM users ORDER BY id DESC LIMIT 1"
-    );
-    return userResult.rows[0]?.id ?? null;
-  }
+async function resolveUserId(value: string): Promise<string | null> {
+  const userResult = await query<UserRow>(
+    "SELECT id, first_name, last_name, email, role FROM users WHERE id = $1 AND deleted_at IS NULL",
+    [value]
+  );
+  return userResult.rows[0]?.id ?? null;
 }
 
 // Compatibility endpoint for mobile clients currently calling `/home/user`.
 router.get("/user", async (req: Request, res: Response) => {
   const log = req.log;
-  const userId = typeof req.query.userId === "string" ? req.query.userId : "";
+  const userId = resolveRequestedUserId(req, req.query.userId);
+  if (!userId) {
+    return res.status(403).json({ ok: false, message: "Not authorized" });
+  }
 
   try {
-    let user: UserRow | undefined;
-    if (userId) {
-      const userResult = await query<UserRow>(
-        "SELECT id, first_name, last_name, email, role FROM users WHERE id = $1",
-        [userId]
-      );
-      user = userResult.rows[0];
-    } else {
-      try {
-        const userResult = await query<UserRow>(
-          "SELECT id, first_name, last_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
-        );
-        user = userResult.rows[0];
-      } catch (err) {
-        if (!isDbColumnError(err)) throw err;
-        log.warn({ err }, "Falling back to users ORDER BY id (created_at missing)");
-        const userResult = await query<UserRow>(
-          "SELECT id, first_name, last_name, email, role FROM users ORDER BY id DESC LIMIT 1"
-        );
-        user = userResult.rows[0];
-      }
-    }
-
-    if (!user && userId) {
-      log.warn({ requestedUserId: userId }, "Requested user not found, falling back to latest user");
-      try {
-        const fallbackResult = await query<UserRow>(
-          "SELECT id, first_name, last_name, email, role FROM users ORDER BY created_at DESC LIMIT 1"
-        );
-        user = fallbackResult.rows[0];
-      } catch (err) {
-        if (!isDbColumnError(err)) throw err;
-        const fallbackResult = await query<UserRow>(
-          "SELECT id, first_name, last_name, email, role FROM users ORDER BY id DESC LIMIT 1"
-        );
-        user = fallbackResult.rows[0];
-      }
-    }
+    const userResult = await query<UserRow>(
+      "SELECT id, first_name, last_name, email, role FROM users WHERE id = $1 AND deleted_at IS NULL",
+      [userId]
+    );
+    const user = userResult.rows[0];
 
     if (!user) {
       return res.status(404).json({ ok: false, message: "User not found" });
@@ -328,11 +293,8 @@ router.get("/user", async (req: Request, res: Response) => {
       },
     });
   } catch (err) {
-    log.warn({ err, userId }, "Home data query failed, serving fallback payload");
-    return res.json({
-      ...fallbackHomePayload(),
-      degraded: true,
-    });
+    log.error({ err, userId }, "Home data query failed");
+    return res.status(503).json({ ok: false, message: "Home data is temporarily unavailable" });
   }
 });
 
@@ -386,7 +348,11 @@ router.post("/user/vehicles", async (req: Request, res: Response) => {
   }
 
   try {
-    const userId = await resolveUserId(requestedUserId);
+    const authorizedUserId = resolveRequestedUserId(req, requestedUserId);
+    if (!authorizedUserId) {
+      return res.status(403).json({ ok: false, message: "Not authorized" });
+    }
+    const userId = await resolveUserId(authorizedUserId);
     if (!userId) {
       return res.status(404).json({ ok: false, message: "User not found" });
     }
@@ -460,22 +426,19 @@ router.post("/user/vehicles", async (req: Request, res: Response) => {
 
 
 router.get("/profile", async (req: Request, res: Response) => {
-  const requestedUserId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+  const requested = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+  const authorizedUserId = resolveRequestedUserId(req, requested);
+  if (!authorizedUserId) {
+    return res.status(403).json({ ok: false, message: "Not authorized" });
+  }
 
   try {
-    let userId = await resolveUserId(requestedUserId || undefined);
-    if (!userId && requestedUserId) {
-      req.log.warn(
-        { requestedUserId },
-        "Requested profile user not found, falling back to latest user"
-      );
-      userId = await resolveUserId(undefined);
-    }
+    const userId = await resolveUserId(authorizedUserId);
     if (!userId) {
       return res.status(404).json({
         ok: false,
         message: "User not found",
-        requestedUserId: requestedUserId || undefined,
+        requestedUserId: requested || undefined,
       });
     }
 
@@ -504,7 +467,7 @@ router.get("/profile", async (req: Request, res: Response) => {
       role: user.role,
     });
   } catch (err) {
-    req.log.error({ err, requestedUserId }, "Profile fetch failed");
+    req.log.error({ err, requestedUserId: requested }, "Profile fetch failed");
     return res.status(500).json({ ok: false, message: "Could not load profile" });
   }
 });
@@ -521,12 +484,17 @@ router.patch("/profile", async (req: Request, res: Response) => {
     return res.status(400).json({ ok: false, message: "userId is required" });
   }
 
+  const authorizedUserId = resolveRequestedUserId(req, requestedUserId);
+  if (!authorizedUserId) {
+    return res.status(403).json({ ok: false, message: "Not authorized" });
+  }
+
   if (!firstName) {
     return res.status(400).json({ ok: false, message: "firstName is required" });
   }
 
   try {
-    const userId = await resolveUserId(requestedUserId);
+    const userId = await resolveUserId(authorizedUserId);
     if (!userId) {
       return res.status(404).json({ ok: false, message: "User not found" });
     }
@@ -561,11 +529,15 @@ router.patch("/profile", async (req: Request, res: Response) => {
 });
 
 router.delete("/user/vehicles/:vehicleId", async (req: Request, res: Response) => {
-  const { vehicleId } = req.params;
-  const requestedUserId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+  const vehicleId = String(req.params.vehicleId);
+  const requested = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+  const authorizedUserId = resolveRequestedUserId(req, requested);
+  if (!authorizedUserId) {
+    return res.status(403).json({ ok: false, message: "Not authorized" });
+  }
 
   try {
-    const userId = await resolveUserId(requestedUserId || undefined);
+    const userId = await resolveUserId(authorizedUserId);
     if (!userId) {
       return res.status(404).json({ ok: false, message: "User not found" });
     }
@@ -581,7 +553,7 @@ router.delete("/user/vehicles/:vehicleId", async (req: Request, res: Response) =
 
     return res.json({ ok: true });
   } catch (err) {
-    req.log.error({ err, vehicleId, requestedUserId }, "Vehicle delete failed");
+    req.log.error({ err, vehicleId, requestedUserId: requested }, "Vehicle delete failed");
     return res.status(500).json({ ok: false, message: "Could not delete vehicle" });
   }
 });

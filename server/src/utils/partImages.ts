@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { mediaReadUrlForStorageUri } from "../services/objectStorage";
 
 const MAX_PART_IMAGE_BYTES = 8 * 1024 * 1024;
 const INLINE_IMAGE_PATTERN =
@@ -33,15 +34,17 @@ export function publicPartImageUrl(
   storedImageUrl: string | null,
 ): string | null {
   if (!storedImageUrl) return null;
-  if (!storedImageUrl.startsWith("data:image/")) return storedImageUrl;
+  if (!storedImageUrl.startsWith("data:image/") && !storedImageUrl.startsWith("s3://")) {
+    return storedImageUrl;
+  }
 
   return `${publicApiBaseUrl(req)}/parts/${encodeURIComponent(partId)}/image`;
 }
 
-export function sendPartImage(
+export async function sendPartImage(
   res: Response,
   storedImageUrl: string | null,
-): void {
+): Promise<void> {
   if (!storedImageUrl) {
     res.status(404).json({ ok: false, message: "Part image not found" });
     return;
@@ -49,6 +52,16 @@ export function sendPartImage(
 
   if (/^https?:\/\//i.test(storedImageUrl)) {
     res.redirect(302, storedImageUrl);
+    return;
+  }
+
+  if (storedImageUrl.startsWith("s3://")) {
+    const signedUrl = await mediaReadUrlForStorageUri(storedImageUrl);
+    if (!signedUrl) {
+      res.status(404).json({ ok: false, message: "Part image not found" });
+      return;
+    }
+    res.redirect(302, signedUrl);
     return;
   }
 

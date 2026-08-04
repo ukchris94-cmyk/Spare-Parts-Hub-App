@@ -1,11 +1,20 @@
 import { Router, Request, Response } from "express";
+import { randomUUID } from "crypto";
 import { query, withClient } from "../db";
+import { requireAuthenticated } from "../middleware/auth";
 import { publicPartImageUrl } from "../utils/partImages";
+import { requestAccountDeletion } from "../services/accountDeletion";
 
 const router = Router();
+router.use(requireAuthenticated);
+
+function canAccessUser(req: Request, userId: string): boolean {
+  return !!req.user &&
+    (req.user.id === userId || ["admin", "staff"].includes(req.user.role));
+}
 
 function genId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}_${randomUUID()}`;
 }
 
 type UserRow = {
@@ -46,6 +55,16 @@ type PartRow = {
   role: string | null;
 };
 
+router.delete("/me", async (req: Request, res: Response) => {
+  if (!req.user) return res.status(401).json({ ok: false, message: "Authentication required" });
+  const result = await requestAccountDeletion(req.user.id);
+  return res.status(result.status === "scheduled" ? 202 : 200).json({
+    ok: true,
+    status: result.status,
+    message: result.message,
+  });
+});
+
 function buildKnownIssuePartNames(make?: string | null, model?: string | null): string[] {
   const key = `${make ?? ""} ${model ?? ""}`.toLowerCase();
   if (key.includes("toyota")) return ["Brake Pads", "Spark Plugs", "Oil Filter"];
@@ -57,8 +76,11 @@ function buildKnownIssuePartNames(make?: string | null, model?: string | null): 
 
 // Home dashboard summary for the User role.
 router.get("/:userId/home", async (req: Request, res: Response) => {
-  const { userId } = req.params;
+  const userId = String(req.params.userId);
   const log = req.log;
+  if (!canAccessUser(req, userId)) {
+    return res.status(403).json({ ok: false, message: "Not authorized" });
+  }
 
   try {
     const { rows: userRows } = await query<UserRow>(
@@ -179,7 +201,10 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
 
 // List all vehicles for a user (used by both Home and Garage flows)
 router.get("/:userId/vehicles", async (req: Request, res: Response) => {
-  const { userId } = req.params;
+  const userId = String(req.params.userId);
+  if (!canAccessUser(req, userId)) {
+    return res.status(403).json({ ok: false, message: "Not authorized" });
+  }
   const { rows } = await query<VehicleRow>(
     `SELECT id, user_id, year, mileage, make, model, trim, engine, vin, is_primary, created_at
      FROM vehicles
@@ -195,8 +220,11 @@ router.get("/:userId/vehicles", async (req: Request, res: Response) => {
 
 // Add a vehicle to the user's garage.
 router.post("/:userId/vehicles", async (req: Request, res: Response) => {
-  const { userId } = req.params;
+  const userId = String(req.params.userId);
   const log = req.log;
+  if (!canAccessUser(req, userId)) {
+    return res.status(403).json({ ok: false, message: "Not authorized" });
+  }
   const {
     year,
     mileage,
@@ -290,8 +318,12 @@ router.post("/:userId/vehicles", async (req: Request, res: Response) => {
 router.patch(
   "/:userId/vehicles/:vehicleId",
   async (req: Request, res: Response) => {
-    const { userId, vehicleId } = req.params;
+    const userId = String(req.params.userId);
+    const vehicleId = String(req.params.vehicleId);
     const log = req.log;
+    if (!canAccessUser(req, userId)) {
+      return res.status(403).json({ ok: false, message: "Not authorized" });
+    }
     const {
       year,
       mileage,
@@ -398,8 +430,12 @@ router.patch(
 router.delete(
   "/:userId/vehicles/:vehicleId",
   async (req: Request, res: Response) => {
-    const { userId, vehicleId } = req.params;
+    const userId = String(req.params.userId);
+    const vehicleId = String(req.params.vehicleId);
     const log = req.log;
+    if (!canAccessUser(req, userId)) {
+      return res.status(403).json({ ok: false, message: "Not authorized" });
+    }
 
     try {
       const { rowCount } = await query(

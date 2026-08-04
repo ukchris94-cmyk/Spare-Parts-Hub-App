@@ -1,12 +1,18 @@
 import { Router, Request, Response } from "express";
+import { randomUUID } from "crypto";
 import { query } from "../db";
+import { requireAuthenticated, requireRoles } from "../middleware/auth";
 import { createNotification } from "../services/notifications";
 import { publicPartImageUrl, sendPartImage } from "../utils/partImages";
 
 const router = Router();
 
+function isPrivileged(req: Request): boolean {
+  return ["admin", "staff"].includes(req.user?.role || "");
+}
+
 function genId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}_${randomUUID()}`;
 }
 
 function isDbColumnError(err: unknown): boolean {
@@ -88,13 +94,8 @@ function mapBargainOffer(row: BargainOfferRow) {
   };
 }
 
-let bargainOfferColumnsReady = false;
 async function ensureBargainOfferColumns(): Promise<void> {
-  if (bargainOfferColumnsReady) return;
-  await query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_price_ngn INTEGER");
-  await query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ");
-  await query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS used_order_id TEXT REFERENCES orders(id) ON DELETE SET NULL");
-  bargainOfferColumnsReady = true;
+  return;
 }
 
 async function loadBargainOffer(offerId: string) {
@@ -295,10 +296,10 @@ router.get("/:partId/image", async (req: Request, res: Response) => {
     "SELECT image_url FROM parts WHERE id = $1 LIMIT 1",
     [partId],
   );
-  return sendPartImage(res, result.rows[0]?.image_url ?? null);
+  return await sendPartImage(res, result.rows[0]?.image_url ?? null);
 });
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, res: Response) => {
   const log = req.log;
   const { userId, name, description, imageUrl, role, priceNgn, stockQty } = req.body as {
     userId?: string;
@@ -315,8 +316,10 @@ router.post("/", async (req: Request, res: Response) => {
     typeof description === "string" ? description.trim() : "";
   const normalizedImageUrl =
     typeof imageUrl === "string" && imageUrl.trim() ? imageUrl.trim() : null;
-  const normalizedUserId = typeof userId === "string" && userId.trim() ? userId.trim() : null;
-  const normalizedRole = typeof role === "string" ? role.trim().toLowerCase() : null;
+  const requestedUserId = typeof userId === "string" && userId.trim() ? userId.trim() : null;
+  const normalizedUserId = req.user?.role === "vendor" ? req.user.id : requestedUserId;
+  const requestedRole = typeof role === "string" ? role.trim().toLowerCase() : null;
+  const normalizedRole = req.user?.role === "vendor" ? "vendor" : requestedRole;
   const normalizedPriceNgn = toNullableInt(priceNgn);
   const normalizedStockQty = toNullableInt(stockQty);
 
@@ -388,8 +391,8 @@ router.post("/", async (req: Request, res: Response) => {
   }
 });
 
-router.post("/:partId/bargain", async (req: Request, res: Response) => {
-  const { partId } = req.params;
+router.post("/:partId/bargain", requireAuthenticated, async (req: Request, res: Response) => {
+  const partId = String(req.params.partId);
   const log = req.log;
   const { buyerUserId, offerPriceNgn, note } = req.body as {
     buyerUserId?: string;
@@ -397,8 +400,7 @@ router.post("/:partId/bargain", async (req: Request, res: Response) => {
     note?: string;
   };
 
-  const normalizedBuyerUserId =
-    typeof buyerUserId === "string" && buyerUserId.trim() ? buyerUserId.trim() : "";
+  const normalizedBuyerUserId = req.user?.id || "";
   const normalizedOfferPriceNgn = toNullableInt(offerPriceNgn);
   const normalizedNote = typeof note === "string" ? note.trim().slice(0, 500) : "";
 
@@ -503,8 +505,8 @@ router.post("/:partId/bargain", async (req: Request, res: Response) => {
   });
 });
 
-router.patch("/:partId", async (req: Request, res: Response) => {
-  const { partId } = req.params;
+router.patch("/:partId", requireAuthenticated, async (req: Request, res: Response) => {
+  const partId = String(req.params.partId);
   const log = req.log;
   const { name, description, imageUrl, priceNgn, stockQty } = req.body as {
     name?: string;
@@ -521,6 +523,17 @@ router.patch("/:partId", async (req: Request, res: Response) => {
     typeof imageUrl === "string" ? imageUrl.trim() : undefined;
   const normalizedPriceNgn = toNullableInt(priceNgn);
   const normalizedStockQty = toNullableInt(stockQty);
+
+  const ownerResult = await query<{ user_id: string | null }>(
+    "SELECT user_id FROM parts WHERE id = $1 LIMIT 1",
+    [partId]
+  );
+  if (!ownerResult.rows[0]) {
+    return res.status(404).json({ ok: false, message: "Part not found" });
+  }
+  if (!isPrivileged(req) && ownerResult.rows[0].user_id !== req.user?.id) {
+    return res.status(403).json({ ok: false, message: "Not authorized to update this part" });
+  }
 
   if (normalizedPriceNgn !== null && normalizedPriceNgn <= 0) {
     return res.status(400).json({ ok: false, message: "priceNgn must be a positive number" });
@@ -644,16 +657,18 @@ router.patch("/:partId", async (req: Request, res: Response) => {
   }
 });
 
-router.delete("/:partId", async (req: Request, res: Response) => {
-  const { partId } = req.params;
-  const result = await query("DELETE FROM parts WHERE id = $1", [partId]);
+router.delete("/:partId", requireAuthenticated, async (req: Request, res: Response) => {
+  const partId = String(req.params.partId);
+  const result = isPrivileged(req)
+    ? await query("DELETE FROM parts WHERE id = $1", [partId])
+    : await query("DELETE FROM parts WHERE id = $1 AND user_id = $2", [partId, req.user?.id]);
   if (!result.rowCount) {
     return res.status(404).json({ ok: false, message: "Part not found" });
   }
   return res.json({ ok: true });
 });
 
-router.post("/requests", async (req: Request, res: Response) => {
+router.post("/requests", requireAuthenticated, async (req: Request, res: Response) => {
   const log = req.log;
   const { userId, vehicle, partDescription, urgency } = req.body as {
     userId?: string;
@@ -662,35 +677,35 @@ router.post("/requests", async (req: Request, res: Response) => {
     urgency?: string;
   };
 
-  if (!userId) {
-    return res.status(400).json({ ok: false, message: "userId is required" });
-  }
+  const authenticatedUserId = req.user?.id;
+  if (!authenticatedUserId) return res.status(401).json({ ok: false, message: "Authentication required" });
 
   const id = genId("req");
   try {
     await query(
       `INSERT INTO part_requests (id, user_id, vehicle, part_description, urgency, status)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [id, userId, vehicle ?? null, partDescription ?? null, urgency ?? null, "open"]
+      [id, authenticatedUserId, vehicle ?? null, partDescription ?? null, urgency ?? null, "open"]
     );
-    log.info({ requestId: id, userId }, "Part request created");
+    log.info({ requestId: id, userId: authenticatedUserId }, "Part request created");
     return res.status(201).json({
       id,
-      userId,
+      userId: authenticatedUserId,
       vehicle: vehicle ?? null,
       partDescription: partDescription ?? null,
       urgency: urgency ?? null,
       status: "open",
     });
   } catch (err) {
-    log.error({ err, userId }, "Part request create failed");
+    log.error({ err, userId: authenticatedUserId }, "Part request create failed");
     throw err;
   }
 });
 
-router.get("/requests/open", async (req: Request, res: Response) => {
-  const vendorUserId =
+router.get("/requests/open", requireRoles("vendor", "admin", "staff"), async (req: Request, res: Response) => {
+  const requestedVendorUserId =
     typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+  const vendorUserId = req.user?.role === "vendor" ? req.user.id : requestedVendorUserId;
   const limitRaw =
     typeof req.query.limit === "string"
       ? Number.parseInt(req.query.limit, 10)
@@ -752,8 +767,11 @@ router.get("/requests/open", async (req: Request, res: Response) => {
   });
 });
 
-router.get("/requests/user/:userId", async (req: Request, res: Response) => {
-  const { userId } = req.params;
+router.get("/requests/user/:userId", requireAuthenticated, async (req: Request, res: Response) => {
+  const userId = String(req.params.userId);
+  if (!isPrivileged(req) && req.user?.id !== userId) {
+    return res.status(403).json({ ok: false, message: "Not authorized" });
+  }
   const { rows } = await query<{
     id: string;
     user_id: string;
@@ -796,17 +814,9 @@ router.get("/requests/user/:userId", async (req: Request, res: Response) => {
   });
 });
 
-router.delete("/requests/:requestId", async (req: Request, res: Response) => {
-  const { requestId } = req.params;
-  const userIdFromQuery =
-    typeof req.query.userId === "string" ? req.query.userId.trim() : "";
-  const userIdFromBody =
-    typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
-  const userId = userIdFromQuery || userIdFromBody;
-
-  if (!userId) {
-    return res.status(400).json({ ok: false, message: "userId is required" });
-  }
+router.delete("/requests/:requestId", requireAuthenticated, async (req: Request, res: Response) => {
+  const requestId = String(req.params.requestId);
+  const userId = req.user?.id || "";
 
   const requestLookup = await query<{
     id: string;
@@ -824,7 +834,7 @@ router.delete("/requests/:requestId", async (req: Request, res: Response) => {
   if (!requestRow) {
     return res.status(404).json({ ok: false, message: "Request not found" });
   }
-  if (requestRow.user_id !== userId) {
+  if (!isPrivileged(req) && requestRow.user_id !== userId) {
     return res.status(403).json({ ok: false, message: "Not allowed to delete this request" });
   }
   if (["matched", "closed"].includes(requestRow.status)) {
@@ -843,8 +853,8 @@ router.delete("/requests/:requestId", async (req: Request, res: Response) => {
   return res.json({ ok: true, requestId });
 });
 
-router.post("/requests/:requestId/quotes", async (req: Request, res: Response) => {
-  const { requestId } = req.params;
+router.post("/requests/:requestId/quotes", requireRoles("vendor", "admin", "staff"), async (req: Request, res: Response) => {
+  const requestId = String(req.params.requestId);
   const log = req.log;
   const {
     vendorUserId,
@@ -860,8 +870,9 @@ router.post("/requests/:requestId/quotes", async (req: Request, res: Response) =
     note?: string;
   };
 
-  const normalizedVendorUserId =
+  const requestedVendorUserId =
     typeof vendorUserId === "string" ? vendorUserId.trim() : "";
+  const normalizedVendorUserId = req.user?.role === "vendor" ? req.user.id : requestedVendorUserId;
   const normalizedPartId = typeof partId === "string" && partId.trim() ? partId.trim() : null;
   const normalizedPriceNgn = toNullableInt(priceNgn);
   const normalizedEtaMinutes = toNullableInt(etaMinutes);
@@ -877,12 +888,28 @@ router.post("/requests/:requestId/quotes", async (req: Request, res: Response) =
     return res.status(400).json({ ok: false, message: "etaMinutes must be a positive number" });
   }
 
-  const requestRow = await query<{ id: string }>(
-    `SELECT id FROM part_requests WHERE id = $1 LIMIT 1`,
+  const requestRow = await query<{ id: string; status: string }>(
+    `SELECT id, status FROM part_requests WHERE id = $1 LIMIT 1`,
     [requestId],
   );
   if (!requestRow.rows[0]) {
     return res.status(404).json({ ok: false, message: "Request not found" });
+  }
+  if (requestRow.rows[0].status !== "open") {
+    return res.status(409).json({ ok: false, message: "This request is no longer open for quotes" });
+  }
+
+  if (normalizedPartId) {
+    const part = await query<{ user_id: string | null }>(
+      "SELECT user_id FROM parts WHERE id = $1 LIMIT 1",
+      [normalizedPartId],
+    );
+    if (!part.rows[0]) {
+      return res.status(404).json({ ok: false, message: "Quoted part was not found" });
+    }
+    if (req.user?.role === "vendor" && part.rows[0].user_id !== normalizedVendorUserId) {
+      return res.status(403).json({ ok: false, message: "You can only quote parts from your inventory" });
+    }
   }
 
   const quoteId = genId("qt");
@@ -941,8 +968,9 @@ router.post("/requests/:requestId/quotes", async (req: Request, res: Response) =
   return res.status(201).json({ ok: true, quote: result.rows[0] });
 });
 
-router.post("/requests/:requestId/quotes/:quoteId/counter", async (req: Request, res: Response) => {
-  const { requestId, quoteId } = req.params;
+router.post("/requests/:requestId/quotes/:quoteId/counter", requireAuthenticated, async (req: Request, res: Response) => {
+  const requestId = String(req.params.requestId);
+  const quoteId = String(req.params.quoteId);
   const {
     userId,
     priceNgn,
@@ -953,7 +981,7 @@ router.post("/requests/:requestId/quotes/:quoteId/counter", async (req: Request,
     note?: string;
   };
 
-  const normalizedUserId = typeof userId === "string" ? userId.trim() : "";
+  const normalizedUserId = req.user?.id || "";
   const normalizedPriceNgn = toNullableInt(priceNgn);
   const normalizedNote = typeof note === "string" ? note.trim() : "";
 
@@ -977,8 +1005,12 @@ router.post("/requests/:requestId/quotes/:quoteId/counter", async (req: Request,
          status = 'countered',
          updated_at = NOW()
      WHERE id = $3 AND request_id = $4
+       AND EXISTS (
+         SELECT 1 FROM part_requests pr
+         WHERE pr.id = part_request_quotes.request_id AND pr.user_id = $5
+       )
      RETURNING id, counter_price_ngn, counter_note, status`,
-    [normalizedPriceNgn, normalizedNote || null, quoteId, requestId],
+    [normalizedPriceNgn, normalizedNote || null, quoteId, requestId, normalizedUserId],
   );
 
   if (!result.rows[0]) {
@@ -988,8 +1020,9 @@ router.post("/requests/:requestId/quotes/:quoteId/counter", async (req: Request,
   return res.json({ ok: true, quote: result.rows[0] });
 });
 
-router.post("/requests/:requestId/quotes/:quoteId/respond", async (req: Request, res: Response) => {
-  const { requestId, quoteId } = req.params;
+router.post("/requests/:requestId/quotes/:quoteId/respond", requireRoles("vendor", "admin", "staff"), async (req: Request, res: Response) => {
+  const requestId = String(req.params.requestId);
+  const quoteId = String(req.params.quoteId);
   const {
     vendorUserId,
     action,
@@ -998,8 +1031,9 @@ router.post("/requests/:requestId/quotes/:quoteId/respond", async (req: Request,
     action?: string;
   };
 
-  const normalizedVendorUserId =
+  const requestedVendorUserId =
     typeof vendorUserId === "string" ? vendorUserId.trim() : "";
+  const normalizedVendorUserId = req.user?.role === "vendor" ? req.user.id : requestedVendorUserId;
   const normalizedAction = typeof action === "string" ? action.trim().toLowerCase() : "";
 
   if (!normalizedVendorUserId) {
@@ -1038,15 +1072,20 @@ router.post("/requests/:requestId/quotes/:quoteId/respond", async (req: Request,
   return res.json({ ok: true, quote: result.rows[0] });
 });
 
-router.post("/requests/:requestId/quotes/:quoteId/accept", async (req: Request, res: Response) => {
-  const { requestId, quoteId } = req.params;
+router.post("/requests/:requestId/quotes/:quoteId/accept", requireAuthenticated, async (req: Request, res: Response) => {
+  const requestId = String(req.params.requestId);
+  const quoteId = String(req.params.quoteId);
 
   const quoteResult = await query<{ id: string; request_id: string }>(
     `UPDATE part_request_quotes
      SET status = 'accepted', updated_at = NOW()
      WHERE id = $1 AND request_id = $2
+       AND EXISTS (
+         SELECT 1 FROM part_requests pr
+         WHERE pr.id = part_request_quotes.request_id AND pr.user_id = $3
+       )
      RETURNING id, request_id`,
-    [quoteId, requestId],
+    [quoteId, requestId, req.user?.id],
   );
 
   if (!quoteResult.rows[0]) {
@@ -1070,8 +1109,8 @@ router.post("/requests/:requestId/quotes/:quoteId/accept", async (req: Request, 
   return res.json({ ok: true, quoteId, requestId });
 });
 
-router.get("/requests/:requestId/offers", async (req: Request, res: Response) => {
-  const { requestId } = req.params;
+router.get("/requests/:requestId/offers", requireAuthenticated, async (req: Request, res: Response) => {
+  const requestId = String(req.params.requestId);
 
   const requestResult = await query<{
     id: string;
@@ -1092,6 +1131,17 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
 
   if (!requestRow) {
     return res.status(404).json({ ok: false, message: "Request not found" });
+  }
+  if (!isPrivileged(req) && requestRow.user_id !== req.user?.id) {
+    const vendorAccess = req.user?.role === "vendor"
+      ? await query<{ found: boolean }>(
+          "SELECT EXISTS(SELECT 1 FROM part_request_quotes WHERE request_id = $1 AND vendor_user_id = $2) AS found",
+          [requestId, req.user.id]
+        )
+      : { rows: [{ found: false }] };
+    if (!vendorAccess.rows[0]?.found) {
+      return res.status(403).json({ ok: false, message: "Not authorized to view these offers" });
+    }
   }
 
   const quotesResult = await query<{
@@ -1190,9 +1240,9 @@ router.get("/requests/:requestId/offers", async (req: Request, res: Response) =>
   });
 });
 
-router.get("/bargain-offers/:offerId/messages", async (req: Request, res: Response) => {
-  const { offerId } = req.params;
-  const userId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+router.get("/bargain-offers/:offerId/messages", requireAuthenticated, async (req: Request, res: Response) => {
+  const offerId = String(req.params.offerId);
+  const userId = req.user?.id || "";
 
   if (!userId) {
     return res.status(400).json({ ok: false, message: "userId is required" });
@@ -1209,10 +1259,10 @@ router.get("/bargain-offers/:offerId/messages", async (req: Request, res: Respon
   return res.json({ ok: true, messages: await loadBargainMessages(offerId) });
 });
 
-router.post("/bargain-offers/:offerId/messages", async (req: Request, res: Response) => {
-  const { offerId } = req.params;
+router.post("/bargain-offers/:offerId/messages", requireAuthenticated, async (req: Request, res: Response) => {
+  const offerId = String(req.params.offerId);
   const log = req.log;
-  const userId = typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
+  const userId = req.user?.id || "";
   const message = typeof req.body?.message === "string" ? req.body.message.trim().slice(0, 1000) : "";
 
   if (!userId) {
@@ -1264,9 +1314,9 @@ router.post("/bargain-offers/:offerId/messages", async (req: Request, res: Respo
   return res.status(201).json({ ok: true, message: mapBargainMessage(rows[0]) });
 });
 
-router.get("/bargain-offers/:offerId", async (req: Request, res: Response) => {
-  const { offerId } = req.params;
-  const userId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+router.get("/bargain-offers/:offerId", requireAuthenticated, async (req: Request, res: Response) => {
+  const offerId = String(req.params.offerId);
+  const userId = req.user?.id || "";
 
   if (!userId) {
     return res.status(400).json({ ok: false, message: "userId is required" });
@@ -1283,8 +1333,8 @@ router.get("/bargain-offers/:offerId", async (req: Request, res: Response) => {
   return res.json({ ok: true, offer: mapBargainOffer(offer), messages: await loadBargainMessages(offerId) });
 });
 
-router.patch("/bargain-offers/:offerId", async (req: Request, res: Response) => {
-  const { offerId } = req.params;
+router.patch("/bargain-offers/:offerId", requireRoles("vendor", "admin", "staff"), async (req: Request, res: Response) => {
+  const offerId = String(req.params.offerId);
   const log = req.log;
   const { userId, action, vendorReply } = req.body as {
     userId?: string;
@@ -1292,7 +1342,9 @@ router.patch("/bargain-offers/:offerId", async (req: Request, res: Response) => 
     vendorReply?: string;
   };
 
-  const normalizedUserId = typeof userId === "string" ? userId.trim() : "";
+  const normalizedUserId = req.user?.role === "vendor"
+    ? req.user.id
+    : typeof userId === "string" ? userId.trim() : "";
   const normalizedAction = typeof action === "string" ? action.trim().toLowerCase() : "";
   const normalizedReply = typeof vendorReply === "string" ? vendorReply.trim().slice(0, 1000) : "";
 

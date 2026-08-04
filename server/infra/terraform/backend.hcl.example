@@ -1,0 +1,6 @@
+bucket       = "replace-with-bootstrap-output"
+key          = "quickserve/production/terraform.tfstate"
+region       = "eu-west-1"
+encrypt      = true
+use_lockfile = true
+

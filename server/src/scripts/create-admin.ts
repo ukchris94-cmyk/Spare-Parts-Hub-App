@@ -32,7 +32,7 @@ function validateEmail(email: string): boolean {
 }
 
 function validatePassword(password: string): string | null {
-  if (!password || password.length < 8) return "Password must be at least 8 characters.";
+  if (!password || password.length < 10) return "Password must be at least 10 characters.";
   if (password.length > 128) return "Password is too long.";
   return null;
 }

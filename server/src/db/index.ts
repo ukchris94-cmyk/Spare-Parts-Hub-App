@@ -1,11 +1,8 @@
-import "dotenv/config";
 import { Pool, PoolClient, PoolConfig } from "pg";
 import { logger } from "../logger";
+import { env } from "../config/env";
 
-const fallbackConnectionString =
-  "postgresql://localhost:5432/spareparts_hub?user=postgres";
-const rawDatabaseUrl = process.env.DATABASE_URL?.trim();
-const connectionString = rawDatabaseUrl || fallbackConnectionString;
+const connectionString = env.databaseUrl;
 
 function describeDatabaseUrl(urlString: string): {
   host: string;
@@ -22,13 +19,25 @@ function describeDatabaseUrl(urlString: string): {
 
 const poolConfig: PoolConfig = {
   connectionString,
-  max: 10,
-  idleTimeoutMillis: 30000,
+  max: env.DATABASE_POOL_MAX,
+  idleTimeoutMillis: env.DATABASE_IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: env.DATABASE_CONNECTION_TIMEOUT_MS,
+  allowExitOnIdle: env.isTest,
+  ...(env.databaseSsl
+    ? {
+        ssl: {
+          rejectUnauthorized: true,
+          ...(env.DATABASE_CA_BASE64
+            ? { ca: Buffer.from(env.DATABASE_CA_BASE64, "base64").toString("utf8") }
+            : {}),
+        },
+      }
+    : {}),
 };
 
 try {
   const info = describeDatabaseUrl(connectionString);
-  if (rawDatabaseUrl && !info.hasPassword && !process.env.PGPASSWORD) {
+  if (env.DATABASE_URL && !info.hasPassword && !process.env.PGPASSWORD) {
     logger.error(
       { host: info.host, database: info.database },
       "DATABASE_URL is set but password is missing. Add password to DATABASE_URL or set PGPASSWORD."
@@ -41,7 +50,7 @@ try {
   }
 } catch (err) {
   logger.error(
-    { err, hasDatabaseUrl: !!rawDatabaseUrl },
+    { err, hasDatabaseUrl: !!env.DATABASE_URL },
     "Invalid DATABASE_URL format"
   );
 }

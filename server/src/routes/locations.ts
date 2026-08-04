@@ -33,20 +33,7 @@ type VendorPickupRow = {
 };
 
 export async function ensureVendorPickupLocationTable(client: DbClient): Promise<void> {
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS vendor_pickup_locations (
-      vendor_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-      formatted_address TEXT NOT NULL,
-      latitude DOUBLE PRECISION NOT NULL,
-      longitude DOUBLE PRECISION NOT NULL,
-      place_id TEXT,
-      address_components JSONB,
-      instructions TEXT,
-      landmark TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
+  void client;
 }
 
 function limitPerMinute(max: number) {

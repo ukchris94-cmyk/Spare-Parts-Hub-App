@@ -1,20 +1,32 @@
 import { Router, Request, Response } from "express";
+import { randomUUID } from "crypto";
+import { rateLimit } from "express-rate-limit";
 import { query, withClient } from "../db";
 import { createNotification, notifyRole } from "../services/notifications";
 import { CheckoutOrderError, createCheckoutOrder } from "../services/orderCheckout";
-import { authenticateRequest, requireAuthenticated } from "../middleware/auth";
+import { authenticateRequest, requireAuthenticated, requireRoles } from "../middleware/auth";
 import { ensureVendorPickupLocationTable } from "./locations";
 import {
   clearDeliveryRouteCache,
   getCachedDeliveryRoute,
   GoogleMapsServiceError,
 } from "../services/googleMaps";
+import { processRefund, queueFullOrderRefund } from "../services/payments/refunds";
+import { createVendorPayoutHold } from "../services/payments/payouts";
 
 const router = Router();
 
 function genId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}_${randomUUID()}`;
 }
+
+const trackingLocationLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 30,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { ok: false, message: "Too many location updates. Please retry shortly." },
+});
 
 const ORDER_STATUSES = [
   "pending",
@@ -119,70 +131,15 @@ type AcceptedBargainRow = {
 };
 
 async function ensureBargainOfferColumns(client: DbClient): Promise<void> {
-  await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_price_ngn INTEGER");
-  await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ");
-  await client.query("ALTER TABLE bargain_offers ADD COLUMN IF NOT EXISTS used_order_id TEXT REFERENCES orders(id) ON DELETE SET NULL");
+  void client;
 }
 
 async function ensureOrderDeliveryColumns(client: DbClient): Promise<void> {
-  await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatcher_id TEXT REFERENCES users(id) ON DELETE SET NULL");
-  await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ");
-  await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMPTZ");
-  await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ");
+  void client;
 }
 
 async function ensureDeliveryJobTable(client: DbClient): Promise<void> {
-  await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT");
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS delivery_jobs (
-      id TEXT PRIMARY KEY,
-      order_id TEXT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
-      vendor_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-      customer_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      dispatcher_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-      pickup_details TEXT,
-      dropoff_details TEXT,
-      status TEXT NOT NULL DEFAULT 'available',
-      issue_note TEXT,
-      failure_reason TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      accepted_at TIMESTAMPTZ,
-      heading_to_pickup_at TIMESTAMPTZ,
-      arrived_at_pickup_at TIMESTAMPTZ,
-      picked_up_at TIMESTAMPTZ,
-      heading_to_dropoff_at TIMESTAMPTZ,
-      arrived_at_dropoff_at TIMESTAMPTZ,
-      delivered_at TIMESTAMPTZ,
-      cancelled_at TIMESTAMPTZ,
-      failed_at TIMESTAMPTZ
-    )
-  `);
-  await client.query("CREATE INDEX IF NOT EXISTS idx_delivery_jobs_available ON delivery_jobs (status, created_at DESC) WHERE dispatcher_id IS NULL");
-  await client.query("CREATE INDEX IF NOT EXISTS idx_delivery_jobs_dispatcher_status ON delivery_jobs (dispatcher_id, status, created_at DESC)");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS pickup_formatted_address TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS pickup_latitude DOUBLE PRECISION");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS pickup_longitude DOUBLE PRECISION");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS pickup_place_id TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS pickup_instructions TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS pickup_landmark TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS pickup_contact_name TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS pickup_contact_phone TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dropoff_formatted_address TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dropoff_latitude DOUBLE PRECISION");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dropoff_longitude DOUBLE PRECISION");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dropoff_place_id TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dropoff_instructions TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dropoff_landmark TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dropoff_contact_name TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dropoff_contact_phone TEXT");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dispatcher_latest_latitude DOUBLE PRECISION");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dispatcher_latest_longitude DOUBLE PRECISION");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dispatcher_location_updated_at TIMESTAMPTZ");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dispatcher_heading DOUBLE PRECISION");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS dispatcher_speed DOUBLE PRECISION");
-  await client.query("ALTER TABLE delivery_jobs ADD COLUMN IF NOT EXISTS tracking_status TEXT");
-  await client.query("CREATE INDEX IF NOT EXISTS idx_delivery_jobs_order_tracking ON delivery_jobs (order_id, dispatcher_id, status)");
+  void client;
 }
 
 const DISPATCHER_ACTIVE_STATUSES = [
@@ -698,7 +655,7 @@ async function normalizeOrderItems(client: DbClient, userId: string, rawItems: u
   return normalized;
 }
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireRoles("admin", "staff"), async (req: Request, res: Response) => {
   const log = req.log;
   const { userId, items } = req.body as { userId?: string; items?: unknown[] };
 
@@ -727,8 +684,11 @@ router.post("/", async (req: Request, res: Response) => {
   }
 });
 
-router.get("/user/:userId", async (req: Request, res: Response) => {
-  const { userId } = req.params;
+router.get("/user/:userId", requireAuthenticated, async (req: Request, res: Response) => {
+  const userId = String(req.params.userId);
+  if (!req.user || (req.user.id !== userId && !["admin", "staff"].includes(req.user.role))) {
+    return res.status(403).json({ ok: false, message: "Not authorized to view these orders" });
+  }
   const { rows } = await query<{
     id: string;
     user_id: string;
@@ -821,8 +781,15 @@ router.get("/user/:userId", async (req: Request, res: Response) => {
   });
 });
 
-router.get("/vendor/:userId", async (req: Request, res: Response) => {
-  const { userId } = req.params;
+router.get("/vendor/:userId", requireAuthenticated, async (req: Request, res: Response) => {
+  const userId = String(req.params.userId);
+  if (
+    !req.user ||
+    (req.user.id !== userId && !["admin", "staff"].includes(req.user.role)) ||
+    (req.user.role !== "vendor" && !["admin", "staff"].includes(req.user.role))
+  ) {
+    return res.status(403).json({ ok: false, message: "Not authorized to view vendor orders" });
+  }
 
   const vendorPartsResult = await query<{ id: string }>(
     `SELECT id
@@ -1037,10 +1004,17 @@ router.get("/dispatcher/:dispatcherId/jobs", requireAuthenticated, async (req: R
   });
 });
 
-router.get("/dispatcher/:dispatcherId/jobs/legacy", async (req: Request, res: Response) => {
+router.get("/dispatcher/:dispatcherId/jobs/legacy", requireAuthenticated, async (req: Request, res: Response) => {
   const dispatcherId = typeof req.params.dispatcherId === "string" ? req.params.dispatcherId.trim() : "";
   if (!dispatcherId) {
     return res.status(400).json({ ok: false, message: "dispatcherId is required" });
+  }
+  if (
+    !req.user ||
+    (req.user.id !== dispatcherId && !["admin", "staff"].includes(req.user.role)) ||
+    (req.user.role !== "dispatcher" && !["admin", "staff"].includes(req.user.role))
+  ) {
+    return res.status(403).json({ ok: false, message: "Not authorized to view these delivery jobs" });
   }
 
   await ensureOrderDeliveryColumns({ query } as unknown as DbClient);
@@ -1123,7 +1097,7 @@ async function orderContainsVendorPart(orderId: string, vendorUserId: string): P
 }
 
 router.post("/:orderId/vendor-decision", requireAuthenticated, async (req: Request, res: Response) => {
-  const { orderId } = req.params;
+  const orderId = String(req.params.orderId);
   const log = req.log;
   const requestedVendorId = typeof req.body?.vendorUserId === "string" ? req.body.vendorUserId.trim() : "";
   const vendorUserId =
@@ -1207,8 +1181,17 @@ router.post("/:orderId/vendor-decision", requireAuthenticated, async (req: Reque
             })
           : null;
 
+      const refund =
+        action === "reject"
+          ? await queueFullOrderRefund(client, {
+              orderId: order.id,
+              requestedBy: req.user!.id,
+              reason: "vendor_rejected",
+            })
+          : null;
+
       await client.query("COMMIT");
-      return { order, deliveryJob };
+      return { order, deliveryJob, refund };
     } catch (err) {
       await client.query("ROLLBACK");
       throw err;
@@ -1223,7 +1206,11 @@ router.post("/:orderId/vendor-decision", requireAuthenticated, async (req: Reque
     });
   }
 
-  const { order, deliveryJob } = result;
+  const { order, deliveryJob, refund } = result;
+
+  if (refund) {
+    await processRefund(refund.id);
+  }
 
   safeNotify(log, async () => {
     if (action === "accept") {
@@ -1263,7 +1250,7 @@ router.post("/:orderId/vendor-decision", requireAuthenticated, async (req: Reque
       recipientRole: "user",
       type: "order_vendor_rejected",
       title: "Order rejected",
-      message: "The vendor could not accept this order. Please choose another listing or contact support.",
+      message: "The vendor could not accept this order. A full payment refund has been started.",
       relatedOrderId: order.id,
     });
   });
@@ -1280,8 +1267,8 @@ router.post("/:orderId/vendor-decision", requireAuthenticated, async (req: Reque
   });
 });
 
-router.patch("/:orderId/status", async (req: Request, res: Response) => {
-  const { orderId } = req.params;
+router.patch("/:orderId/status", requireRoles("admin", "staff"), async (req: Request, res: Response) => {
+  const orderId = String(req.params.orderId);
   const statusRaw = typeof req.body?.status === "string" ? req.body.status.trim().toLowerCase() : "";
   const log = req.log;
 
@@ -1551,6 +1538,13 @@ router.post("/:orderId/dispatcher-status", requireAuthenticated, async (req: Req
         [nextOrderStatus, orderId, dispatcherId],
       );
 
+      if (nextStatus === "delivered" && job.vendor_id && orderResult.rows[0]) {
+        await createVendorPayoutHold(client, {
+          orderId: orderResult.rows[0].id,
+          vendorId: job.vendor_id,
+        });
+      }
+
       await client.query("COMMIT");
       return { job, order: orderResult.rows[0] };
     } catch (err) {
@@ -1608,7 +1602,11 @@ router.post("/:orderId/dispatcher-status", requireAuthenticated, async (req: Req
   });
 });
 
-router.post("/:orderId/tracking/location", requireAuthenticated, async (req: Request, res: Response) => {
+router.post(
+  "/:orderId/tracking/location",
+  requireAuthenticated,
+  trackingLocationLimiter,
+  async (req: Request, res: Response) => {
   const { orderId } = req.params;
   const user = req.user;
   if (!user || user.role !== "dispatcher") {
@@ -1670,7 +1668,8 @@ router.post("/:orderId/tracking/location", requireAuthenticated, async (req: Req
     status: job.status,
     locationUpdatedAt: job.dispatcher_location_updated_at,
   });
-});
+  },
+);
 
 router.get("/:orderId/tracking/route", requireAuthenticated, async (req: Request, res: Response) => {
   const { orderId } = req.params;
@@ -1968,8 +1967,8 @@ router.get("/:orderId/tracking", requireAuthenticated, async (req: Request, res:
   });
 });
 
-router.get("/:orderId", async (req: Request, res: Response) => {
-  const { orderId } = req.params;
+router.get("/:orderId", requireAuthenticated, async (req: Request, res: Response) => {
+  const orderId = String(req.params.orderId);
   const { rows } = await query<{
     id: string;
     user_id: string;
@@ -1979,6 +1978,26 @@ router.get("/:orderId", async (req: Request, res: Response) => {
   const order = rows[0];
   if (!order) {
     return res.status(404).json({ ok: false, message: "Order not found" });
+  }
+  const user = req.user;
+  const isPrivileged = !!user && ["admin", "staff"].includes(user.role);
+  const isCustomer = user?.id === order.user_id;
+  let isVendor = false;
+  let isDispatcher = false;
+  if (user?.role === "vendor") {
+    isVendor = await orderContainsVendorPart(order.id, user.id);
+  }
+  if (user?.role === "dispatcher") {
+    const assignment = await query<{ found: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM delivery_jobs WHERE order_id = $1 AND dispatcher_id = $2
+       ) AS found`,
+      [order.id, user.id]
+    );
+    isDispatcher = assignment.rows[0]?.found === true;
+  }
+  if (!isPrivileged && !isCustomer && !isVendor && !isDispatcher) {
+    return res.status(403).json({ ok: false, message: "Not authorized to view this order" });
   }
   return res.json({
     id: order.id,

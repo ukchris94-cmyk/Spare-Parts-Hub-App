@@ -1,4 +1,5 @@
 import { Router, Request, Response } from "express";
+import { randomUUID } from "crypto";
 import { query } from "../db";
 import { requireAuthenticated } from "../middleware/auth";
 import { logger } from "../logger";
@@ -72,7 +73,7 @@ router.post("/push-token", async (req: Request, res: Response) => {
        user_id = EXCLUDED.user_id,
        platform = EXCLUDED.platform,
        updated_at = NOW()`,
-    [`pt_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, user.id, token, platform],
+    [`pt_${randomUUID()}`, user.id, token, platform],
   );
 
   logger.info(

@@ -1,0 +1,4 @@
+ALTER TABLE media_objects ADD COLUMN IF NOT EXISTS original_name TEXT;
+ALTER TABLE media_objects ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE media_objects ADD COLUMN IF NOT EXISTS failure_reason TEXT;
+

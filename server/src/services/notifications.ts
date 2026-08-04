@@ -1,8 +1,10 @@
 import { query } from "../db";
+import { randomUUID } from "crypto";
 import { logger } from "../logger";
+import { env } from "../config/env";
 
 function genId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}_${randomUUID()}`;
 }
 
 type PushTokenRow = { token: string; platform: string | null };
@@ -43,23 +45,36 @@ async function readExpoJson(response: Response): Promise<any> {
   }
 }
 
-async function fetchExpoReceipts(ticketIds: string[]): Promise<void> {
+function expoHeaders(): Record<string, string> {
+  const accessToken = env.EXPO_ACCESS_TOKEN?.trim();
+  return {
+    Accept: "application/json",
+    "Accept-Encoding": "gzip, deflate",
+    "Content-Type": "application/json",
+    ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+  };
+}
+
+async function removeInvalidPushTokens(tokens: string[]): Promise<void> {
+  const unique = Array.from(new Set(tokens.filter(Boolean)));
+  if (unique.length) await query("DELETE FROM push_tokens WHERE token = ANY($1::text[])", [unique]);
+}
+
+async function fetchExpoReceipts(ticketTokens: Map<string, string>): Promise<void> {
+  const ticketIds = Array.from(ticketTokens.keys());
   if (!ticketIds.length || typeof fetch !== "function") return;
 
   for (const ids of chunk(ticketIds, 100)) {
     const response = await fetch("https://exp.host/--/api/v2/push/getReceipts", {
       method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Accept-Encoding": "gzip, deflate",
-        "Content-Type": "application/json",
-      },
+      headers: expoHeaders(),
       body: JSON.stringify({ ids }),
+      signal: AbortSignal.timeout(5_000),
     });
     const payload = await readExpoJson(response);
     if (!response.ok) {
       logger.warn(
-        { status: response.status, payload },
+        { status: response.status },
         "Expo push receipt request failed",
       );
       continue;
@@ -69,9 +84,17 @@ async function fetchExpoReceipts(ticketIds: string[]): Promise<void> {
     const errors = Object.entries(receipts)
       .map(([id, receipt]) => ({ id, ...(receipt as ExpoReceipt) }))
       .filter((receipt) => receipt.status === "error");
+    await removeInvalidPushTokens(
+      errors
+        .filter((receipt) => receipt.details?.error === "DeviceNotRegistered")
+        .map((receipt) => ticketTokens.get(receipt.id) || ""),
+    );
 
     if (errors.length) {
-      logger.warn({ errors }, "Expo push receipt errors");
+      logger.warn(
+        { errorCount: errors.length, errorCodes: Array.from(new Set(errors.map((error) => error.details?.error || "unknown"))) },
+        "Expo push receipt errors",
+      );
     } else {
       logger.info({ receiptCount: Object.keys(receipts).length }, "Expo push receipts ok");
     }
@@ -117,15 +140,11 @@ async function sendPushNotifications(input: NotificationInput): Promise<void> {
   const timeout = controller ? setTimeout(() => controller.abort(), 3500) : undefined;
 
   try {
-    const ticketIds: string[] = [];
+    const ticketTokens = new Map<string, string>();
     for (const tokenBatch of chunk(tokens, 100)) {
       const response = await fetch("https://exp.host/--/api/v2/push/send", {
         method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Accept-Encoding": "gzip, deflate",
-          "Content-Type": "application/json",
-        },
+        headers: expoHeaders(),
         signal: controller?.signal,
         body: JSON.stringify(
           tokenBatch.map((token) => ({
@@ -147,7 +166,7 @@ async function sendPushNotifications(input: NotificationInput): Promise<void> {
       const payload = await readExpoJson(response);
       if (!response.ok) {
         logger.warn(
-          { status: response.status, payload },
+          { status: response.status },
           "Expo push send request failed",
         );
         continue;
@@ -155,20 +174,30 @@ async function sendPushNotifications(input: NotificationInput): Promise<void> {
 
       const tickets: ExpoTicket[] = Array.isArray(payload?.data) ? payload.data : [];
       const errors = tickets.filter((ticket) => ticket.status === "error");
+      await removeInvalidPushTokens(
+        tickets.flatMap((ticket, index) =>
+          ticket.status === "error" && ticket.details?.error === "DeviceNotRegistered"
+            ? [tokenBatch[index]]
+            : [],
+        ),
+      );
       if (errors.length) {
-        logger.warn({ errors }, "Expo push ticket errors");
+        logger.warn(
+          { errorCount: errors.length, errorCodes: Array.from(new Set(errors.map((error) => error.details?.error || "unknown"))) },
+          "Expo push ticket errors",
+        );
       } else {
         logger.info({ ticketCount: tickets.length }, "Expo push tickets ok");
       }
 
-      ticketIds.push(
-        ...tickets
-          .map((ticket) => (ticket.status === "ok" && ticket.id ? ticket.id : ""))
-          .filter(Boolean),
-      );
+      tickets.forEach((ticket, index) => {
+        if (ticket.status === "ok" && ticket.id && tokenBatch[index]) {
+          ticketTokens.set(ticket.id, tokenBatch[index]);
+        }
+      });
     }
 
-    await fetchExpoReceipts(ticketIds).catch((err) => {
+    await fetchExpoReceipts(ticketTokens).catch((err) => {
       logger.warn({ err }, "Expo push receipt lookup failed");
     });
   } catch (err) {
