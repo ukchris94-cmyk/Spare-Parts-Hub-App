@@ -67,14 +67,3 @@ output "media_bucket" {
 output "jobs_queue_url" {
   value = aws_sqs_queue.jobs.id
 }
-
-output "ses_verification_token" {
-  description = "Add as _amazonses TXT when Route 53 is not managed by this stack."
-  value       = aws_ses_domain_identity.main.verification_token
-  sensitive   = true
-}
-
-output "ses_dkim_tokens" {
-  description = "Add DKIM CNAMEs when Route 53 is not managed by this stack."
-  value       = aws_ses_domain_dkim.main.dkim_tokens
-}

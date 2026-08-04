@@ -25,7 +25,6 @@
   "dependencies": {
     "@aws-sdk/client-kms": "^3.1101.0",
     "@aws-sdk/client-s3": "^3.1101.0",
-    "@aws-sdk/client-sesv2": "^3.1101.0",
     "@aws-sdk/client-sqs": "^3.1101.0",
     "@aws-sdk/s3-request-presigner": "^3.1101.0",
     "@googlemaps/polyline-codec": "^1.0.28",
@@ -35,6 +34,7 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.6.0",
     "helmet": "^8.3.0",
+    "nodemailer": "^9.0.4",
     "pg": "^8.13.0",
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
@@ -44,6 +44,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.6",
     "@types/node": "^22.0.0",
+    "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.11.0",
     "pino-pretty": "^11.3.0",
     "ts-node": "^10.9.2",

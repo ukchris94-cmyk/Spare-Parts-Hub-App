@@ -18,7 +18,7 @@ Target region: `eu-west-1`.
 - SQS plus a dead-letter queue
 - Secrets Manager for application and migration credentials
 - CloudWatch logs, alarms, SNS notifications, and AWS Budgets
-- SES for transactional email
+- Gmail SMTP for low-volume transactional email
 
 ## Manual order of operations
 
@@ -49,7 +49,8 @@ Target region: `eu-west-1`.
     and WAF rules.
 19. Start two API tasks and one worker in private subnets without public IP addresses.
 20. Configure CloudWatch alarms, SNS email confirmation, and monthly budget alerts.
-21. Verify SES identity/DKIM and request SES production access.
+21. Create a dedicated Gmail account, enable 2-Step Verification, generate an app password,
+    and store `SMTP_USER` and `SMTP_PASS` in the runtime secret.
 22. Configure Monnify webhook and redirect URLs.
 
 ## Required application URLs

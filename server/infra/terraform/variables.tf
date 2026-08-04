@@ -159,19 +159,13 @@ variable "alert_email" {
 }
 
 variable "email_from" {
-  description = "Verified SES sender used by the backend."
+  description = "SMTP From header. For Gmail, use the authenticated address or a configured Gmail alias."
   type        = string
 }
 
 variable "email_reply_to" {
   type    = string
   default = ""
-}
-
-variable "ses_identity_domain" {
-  description = "Domain to verify in SES for transactional email."
-  type        = string
-  default     = "quickserve.com.ng"
 }
 
 variable "cors_origins" {

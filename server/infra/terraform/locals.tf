@@ -19,6 +19,8 @@ locals {
     "DATABASE_CA_BASE64",
     "AUTH_TOKEN_SECRET",
     "REFRESH_TOKEN_PEPPER",
+    "SMTP_USER",
+    "SMTP_PASS",
     "GOOGLE_MAPS_SERVER_API_KEY",
     "EXPO_ACCESS_TOKEN",
     ], var.enable_monnify ? [

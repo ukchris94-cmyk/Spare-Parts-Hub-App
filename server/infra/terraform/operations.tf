@@ -106,30 +106,3 @@ resource "aws_budgets_budget" "monthly" {
     subscriber_email_addresses = [var.alert_email]
   }
 }
-
-resource "aws_ses_domain_identity" "main" {
-  domain = var.ses_identity_domain
-}
-
-resource "aws_ses_domain_dkim" "main" {
-  domain = aws_ses_domain_identity.main.domain
-}
-
-resource "aws_route53_record" "ses_verification" {
-  count   = var.route53_zone_id != null ? 1 : 0
-  zone_id = var.route53_zone_id
-  name    = "_amazonses.${var.ses_identity_domain}"
-  type    = "TXT"
-  ttl     = 600
-  records = [aws_ses_domain_identity.main.verification_token]
-}
-
-resource "aws_route53_record" "ses_dkim" {
-  count   = var.route53_zone_id != null ? 3 : 0
-  zone_id = var.route53_zone_id
-  name    = "${aws_ses_domain_dkim.main.dkim_tokens[count.index]}._domainkey.${var.ses_identity_domain}"
-  type    = "CNAME"
-  ttl     = 600
-  records = ["${aws_ses_domain_dkim.main.dkim_tokens[count.index]}.dkim.amazonses.com"]
-}
-

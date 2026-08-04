@@ -8,7 +8,7 @@ acm_certificate_arn = null
 
 domain_name = "backend.quickserve.com.ng"
 alert_email = "operations@quickserve.com.ng"
-email_from  = "QuickServe <notifications@quickserve.com.ng>"
+email_from  = "QuickServe <quickserve.example@gmail.com>"
 email_reply_to = "support@quickserve.com.ng"
 
 # Copy the current official production source IP list from Monnify documentation.

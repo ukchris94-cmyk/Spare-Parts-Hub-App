@@ -82,11 +82,6 @@ data "aws_iam_policy_document" "app" {
     ]
     resources = [aws_sqs_queue.jobs.arn]
   }
-  statement {
-    sid       = "SendTransactionalEmail"
-    actions   = ["ses:SendEmail", "ses:SendRawEmail"]
-    resources = ["*"]
-  }
 }
 
 resource "aws_iam_role_policy" "app" {

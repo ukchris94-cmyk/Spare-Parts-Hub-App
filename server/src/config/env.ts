@@ -30,7 +30,13 @@ const schema = z
     AWS_REGION: z.string().trim().optional(),
     EMAIL_FROM: z.string().trim().optional(),
     EMAIL_REPLY_TO: z.string().trim().optional(),
-    EMAIL_DELIVERY_MODE: z.enum(["ses", "log", "disabled"]).optional(),
+    EMAIL_DELIVERY_MODE: z.enum(["smtp", "log", "disabled"]).optional(),
+    SMTP_HOST: z.string().trim().default("smtp.gmail.com"),
+    SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(465),
+    SMTP_SECURE: booleanString.default(true),
+    SMTP_USER: z.string().trim().optional(),
+    SMTP_PASS: z.string().trim().optional(),
+    SMTP_FROM: z.string().trim().optional(),
     EXPO_ACCESS_TOKEN: z.string().trim().optional(),
     PUBLIC_API_URL: z.string().url().optional(),
     PAYMENTS_ENABLED: booleanString.default(false),
@@ -75,8 +81,6 @@ const schema = z
     if (value.NODE_ENV === "production") {
       const required: Array<[string, unknown]> = [
         ["PUBLIC_API_URL", value.PUBLIC_API_URL],
-        ["AWS_REGION", value.AWS_REGION],
-        ["EMAIL_FROM", value.EMAIL_FROM],
         ["GOOGLE_MAPS_SERVER_API_KEY", value.GOOGLE_MAPS_SERVER_API_KEY],
       ];
       for (const [name, configured] of required) {
@@ -86,6 +90,23 @@ const schema = z
             path: [name],
             message: `${name} is required in production`,
           });
+        }
+      }
+      const emailMode = value.EMAIL_DELIVERY_MODE || "smtp";
+      if (emailMode === "smtp") {
+        const smtpRequired: Array<[string, unknown]> = [
+          ["SMTP_USER", value.SMTP_USER],
+          ["SMTP_PASS", value.SMTP_PASS],
+          ["SMTP_FROM", value.SMTP_FROM || value.EMAIL_FROM || value.SMTP_USER],
+        ];
+        for (const [name, configured] of smtpRequired) {
+          if (!configured) {
+            context.addIssue({
+              code: "custom",
+              path: [name],
+              message: `${name} is required for SMTP email delivery`,
+            });
+          }
         }
       }
       if (value.PAYMENTS_ENABLED) {
@@ -146,7 +167,7 @@ export const env = {
   allowLegacyAuthTokens:
     values.ALLOW_LEGACY_AUTH_TOKENS ?? values.NODE_ENV !== "production",
   emailDeliveryMode:
-    values.EMAIL_DELIVERY_MODE ?? (values.NODE_ENV === "production" ? "ses" : "log"),
+    values.EMAIL_DELIVERY_MODE ?? (values.NODE_ENV === "production" ? "smtp" : "log"),
   corsOrigins: new Set(
     (values.CORS_ORIGINS || (values.NODE_ENV === "production" ? "" : "http://localhost:8081,http://localhost:8085"))
       .split(",")

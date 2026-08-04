@@ -144,6 +144,8 @@ Populate the runtime secret with every key below. Monnify keys are not required 
   "DATABASE_CA_BASE64": "REPLACE_WITH_PUBLIC_CA_BASE64",
   "AUTH_TOKEN_SECRET": "REPLACE_WITH_AT_LEAST_32_RANDOM_CHARACTERS",
   "REFRESH_TOKEN_PEPPER": "REPLACE_WITH_DIFFERENT_RANDOM_VALUE",
+  "SMTP_USER": "quickserve.example@gmail.com",
+  "SMTP_PASS": "REPLACE_WITH_GOOGLE_APP_PASSWORD",
   "GOOGLE_MAPS_SERVER_API_KEY": "REPLACE",
   "EXPO_ACCESS_TOKEN": ""
 }
@@ -189,8 +191,8 @@ curl --fail --show-error https://backend.quickserve.com.ng/healthz
 curl --fail --show-error https://backend.quickserve.com.ng/readyz
 ```
 
-Confirm the SNS subscription email, SES domain/DKIM verification, and request SES production
-access if the account is still in the sandbox. Configure Monnify with:
+Confirm the SNS subscription email and send a verification email using the dedicated Gmail
+account configured through `SMTP_USER` and `SMTP_PASS`. Configure Monnify with:
 
 - Webhook: `https://backend.quickserve.com.ng/api/payments/webhook/monnify`
 - Redirect: `https://backend.quickserve.com.ng/api/payments/return/monnify`

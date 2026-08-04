@@ -1,14 +1,26 @@
-import { SendEmailCommand, SESv2Client } from "@aws-sdk/client-sesv2";
+import nodemailer, { Transporter } from "nodemailer";
 import { env } from "../config/env";
 import { logger } from "../logger";
 
-let client: SESv2Client | undefined;
+let transporter: Transporter | undefined;
 
-function getClient(): SESv2Client {
-  if (!client) {
-    client = new SESv2Client({ region: env.AWS_REGION });
+function getTransporter(): Transporter {
+  if (!transporter) {
+    transporter = nodemailer.createTransport({
+      host: env.SMTP_HOST,
+      port: env.SMTP_PORT,
+      secure: env.SMTP_SECURE,
+      auth: {
+        user: env.SMTP_USER,
+        pass: env.SMTP_PASS,
+      },
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 20_000,
+      tls: { minVersion: "TLSv1.2" },
+    });
   }
-  return client;
+  return transporter;
 }
 
 export async function sendTransactionalEmail(params: {
@@ -30,25 +42,25 @@ export async function sendTransactionalEmail(params: {
     return;
   }
 
-  if (!env.EMAIL_FROM || !env.AWS_REGION) {
-    throw new Error("EMAIL_FROM and AWS_REGION are required for SES email delivery");
+  const from = env.SMTP_FROM || env.EMAIL_FROM || env.SMTP_USER;
+  if (!env.SMTP_USER || !env.SMTP_PASS || !from) {
+    throw new Error("SMTP_USER, SMTP_PASS, and SMTP_FROM are required for email delivery");
   }
 
-  await getClient().send(
-    new SendEmailCommand({
-      FromEmailAddress: env.EMAIL_FROM,
-      ...(env.EMAIL_REPLY_TO ? { ReplyToAddresses: [env.EMAIL_REPLY_TO] } : {}),
-      Destination: { ToAddresses: [params.to] },
-      Content: {
-        Simple: {
-          Subject: { Data: params.subject, Charset: "UTF-8" },
-          Body: {
-            Text: { Data: params.text, Charset: "UTF-8" },
-            ...(params.html ? { Html: { Data: params.html, Charset: "UTF-8" } } : {}),
-          },
-        },
-      },
-    })
+  const result = await getTransporter().sendMail({
+    from,
+    to: params.to,
+    subject: params.subject,
+    text: params.text,
+    ...(params.html ? { html: params.html } : {}),
+    ...(env.EMAIL_REPLY_TO ? { replyTo: env.EMAIL_REPLY_TO } : {}),
+  });
+  logger.info(
+    {
+      messageId: result.messageId,
+      recipientDomain: params.to.split("@")[1],
+      template: params.template,
+    },
+    "Transactional email accepted by SMTP server"
   );
 }
-
