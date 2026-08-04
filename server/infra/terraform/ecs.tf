@@ -40,6 +40,7 @@ locals {
     { name = "EMAIL_DELIVERY_MODE", value = "ses" },
     { name = "CORS_ORIGINS", value = var.cors_origins },
     { name = "APP_DEEP_LINK_SCHEME", value = var.app_deep_link_scheme },
+    { name = "PAYMENTS_ENABLED", value = tostring(var.enable_monnify) },
     { name = "PAYMENT_PROVIDER", value = "monnify" },
     { name = "PAYMENT_CURRENCY", value = "NGN" },
     { name = "PLATFORM_FEE_BPS", value = tostring(var.platform_fee_bps) },
@@ -190,7 +191,7 @@ resource "aws_ecs_task_definition" "database_bootstrap" {
     readonlyRootFilesystem = true
     command                = ["node", "dist/scripts/bootstrap-database-roles.js"]
     environment = [
-      { name = "MASTER_DB_NAME", value = "quickserve" },
+      { name = "MASTER_DB_NAME", value = var.database_name },
       { name = "MASTER_DB_HOST", value = aws_db_instance.postgres.address },
       { name = "MASTER_DB_PORT", value = tostring(aws_db_instance.postgres.port) },
       { name = "MASTER_DB_USERNAME", value = aws_db_instance.postgres.username },

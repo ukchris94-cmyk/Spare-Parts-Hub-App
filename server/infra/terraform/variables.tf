@@ -14,6 +14,17 @@ variable "environment" {
   default = "production"
 }
 
+variable "database_name" {
+  description = "PostgreSQL database name created by RDS and used by bootstrap and migration tasks."
+  type        = string
+  default     = "quickserve"
+
+  validation {
+    condition     = can(regex("^[A-Za-z_][A-Za-z0-9_]{0,62}$", var.database_name))
+    error_message = "database_name must be a valid unquoted PostgreSQL identifier."
+  }
+}
+
 variable "vpc_cidr" {
   type    = string
   default = "10.20.0.0/16"
@@ -180,9 +191,16 @@ variable "monnify_base_url" {
   default = "https://api.monnify.com"
 }
 
+variable "enable_monnify" {
+  description = "Enable Monnify checkout and require its runtime secret keys. Keep false until credentials are issued."
+  type        = bool
+  default     = false
+}
+
 variable "monnify_webhook_ips" {
   description = "Comma-separated official Monnify webhook source IPs."
   type        = string
+  default     = ""
 }
 
 variable "platform_fee_bps" {

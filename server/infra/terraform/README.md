@@ -135,8 +135,8 @@ their separate secrets.
 
 ## 6. Populate application secrets
 
-Populate the runtime secret with every key below. Optional values must still exist as empty
-strings because ECS resolves each JSON key while starting the task.
+Populate the runtime secret with every key below. Monnify keys are not required while
+`enable_monnify = false`.
 
 ```json
 {
@@ -144,14 +144,14 @@ strings because ECS resolves each JSON key while starting the task.
   "DATABASE_CA_BASE64": "REPLACE_WITH_PUBLIC_CA_BASE64",
   "AUTH_TOKEN_SECRET": "REPLACE_WITH_AT_LEAST_32_RANDOM_CHARACTERS",
   "REFRESH_TOKEN_PEPPER": "REPLACE_WITH_DIFFERENT_RANDOM_VALUE",
-  "MONNIFY_API_KEY": "REPLACE",
-  "MONNIFY_SECRET_KEY": "REPLACE",
-  "MONNIFY_CONTRACT_CODE": "REPLACE",
-  "MONNIFY_DISBURSEMENT_SOURCE_ACCOUNT": "",
   "GOOGLE_MAPS_SERVER_API_KEY": "REPLACE",
   "EXPO_ACCESS_TOKEN": ""
 }
 ```
+
+After Monnify issues credentials, add `MONNIFY_API_KEY`, `MONNIFY_SECRET_KEY`,
+`MONNIFY_CONTRACT_CODE`, and `MONNIFY_DISBURSEMENT_SOURCE_ACCOUNT` to the runtime secret,
+set the official `monnify_webhook_ips`, and change `enable_monnify = true`.
 
 Populate the migration secret:
 

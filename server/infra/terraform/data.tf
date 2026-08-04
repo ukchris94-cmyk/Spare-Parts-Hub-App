@@ -126,7 +126,7 @@ resource "aws_db_instance" "postgres" {
   engine                          = "postgres"
   engine_version                  = var.db_engine_version
   instance_class                  = var.db_instance_class
-  db_name                         = "quickserve"
+  db_name                         = var.database_name
   username                        = "quickserve_admin"
   manage_master_user_password     = true
   port                            = 5432

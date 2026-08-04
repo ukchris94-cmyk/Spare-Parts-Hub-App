@@ -9,6 +9,13 @@ function required(name: string): string {
   return value;
 }
 
+function quoteIdentifier(identifier: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(identifier)) {
+    throw new Error("MASTER_DB_NAME must be a valid PostgreSQL identifier");
+  }
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
 async function upsertLoginRole(client: PoolClient, role: string, password: string) {
   if (password.length < 32) throw new Error(`${role} password must be at least 32 characters`);
   const exists = await client.query<{ exists: boolean }>(
@@ -27,6 +34,7 @@ async function main() {
   const user = required("MASTER_DB_USERNAME");
   const password = required("MASTER_DB_PASSWORD");
   const database = process.env.MASTER_DB_NAME?.trim() || "quickserve";
+  const quotedDatabase = quoteIdentifier(database);
   const port = Number(process.env.MASTER_DB_PORT || "5432");
   const ca = required("DATABASE_CA_BASE64");
 
@@ -48,8 +56,8 @@ async function main() {
     await client.query("BEGIN");
     await upsertLoginRole(client, "quickserve_migrator", required("MIGRATION_DB_PASSWORD"));
     await upsertLoginRole(client, "quickserve_runtime", required("RUNTIME_DB_PASSWORD"));
-    await client.query("GRANT CONNECT ON DATABASE quickserve TO quickserve_migrator");
-    await client.query("GRANT CONNECT ON DATABASE quickserve TO quickserve_runtime");
+    await client.query(`GRANT CONNECT ON DATABASE ${quotedDatabase} TO quickserve_migrator`);
+    await client.query(`GRANT CONNECT ON DATABASE ${quotedDatabase} TO quickserve_runtime`);
     await client.query("GRANT USAGE, CREATE ON SCHEMA public TO quickserve_migrator");
     await client.query("GRANT USAGE ON SCHEMA public TO quickserve_runtime");
     await client.query("COMMIT");

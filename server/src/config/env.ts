@@ -33,6 +33,7 @@ const schema = z
     EMAIL_DELIVERY_MODE: z.enum(["ses", "log", "disabled"]).optional(),
     EXPO_ACCESS_TOKEN: z.string().trim().optional(),
     PUBLIC_API_URL: z.string().url().optional(),
+    PAYMENTS_ENABLED: booleanString.default(false),
     PAYMENT_PROVIDER: z.enum(["monnify"]).default("monnify"),
     MONNIFY_BASE_URL: z.string().url().optional(),
     MONNIFY_API_KEY: z.string().trim().optional(),
@@ -76,12 +77,6 @@ const schema = z
         ["PUBLIC_API_URL", value.PUBLIC_API_URL],
         ["AWS_REGION", value.AWS_REGION],
         ["EMAIL_FROM", value.EMAIL_FROM],
-        ["MONNIFY_BASE_URL", value.MONNIFY_BASE_URL],
-        ["MONNIFY_API_KEY", value.MONNIFY_API_KEY],
-        ["MONNIFY_SECRET_KEY", value.MONNIFY_SECRET_KEY],
-        ["MONNIFY_CONTRACT_CODE", value.MONNIFY_CONTRACT_CODE],
-        ["MONNIFY_REDIRECT_URL", value.MONNIFY_REDIRECT_URL],
-        ["MONNIFY_WEBHOOK_IPS", value.MONNIFY_WEBHOOK_IPS],
         ["MEDIA_BUCKET", value.MEDIA_BUCKET],
         ["MEDIA_KMS_KEY_ID", value.MEDIA_KMS_KEY_ID],
         ["PAYOUT_KMS_KEY_ID", value.PAYOUT_KMS_KEY_ID],
@@ -94,6 +89,25 @@ const schema = z
             path: [name],
             message: `${name} is required in production`,
           });
+        }
+      }
+      if (value.PAYMENTS_ENABLED) {
+        const paymentRequired: Array<[string, unknown]> = [
+          ["MONNIFY_BASE_URL", value.MONNIFY_BASE_URL],
+          ["MONNIFY_API_KEY", value.MONNIFY_API_KEY],
+          ["MONNIFY_SECRET_KEY", value.MONNIFY_SECRET_KEY],
+          ["MONNIFY_CONTRACT_CODE", value.MONNIFY_CONTRACT_CODE],
+          ["MONNIFY_REDIRECT_URL", value.MONNIFY_REDIRECT_URL],
+          ["MONNIFY_WEBHOOK_IPS", value.MONNIFY_WEBHOOK_IPS],
+        ];
+        for (const [name, configured] of paymentRequired) {
+          if (!configured) {
+            context.addIssue({
+              code: "custom",
+              path: [name],
+              message: `${name} is required when PAYMENTS_ENABLED=true`,
+            });
+          }
         }
       }
       if (value.PUBLIC_API_URL && !value.PUBLIC_API_URL.startsWith("https://")) {

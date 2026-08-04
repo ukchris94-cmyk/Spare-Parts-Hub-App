@@ -12,7 +12,7 @@
     "test": "npm run build && node --test dist/services/payments/fees.test.js dist/services/payments/monnify.test.js",
     "start": "node dist/server.js",
     "worker": "node dist/worker.js",
-    "migrate": "ts-node -r dotenv/config src/db/migrate.ts",
+    "migrate": "npm run build && node dist/db/migrate.js",
     "migrate:prod": "node dist/db/migrate.js",
     "bootstrap-db-roles:prod": "node dist/scripts/bootstrap-database-roles.js",
     "promote-admin": "ts-node -r dotenv/config src/scripts/promote-admin.ts",

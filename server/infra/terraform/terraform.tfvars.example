@@ -1,4 +1,5 @@
 aws_region = "eu-west-1"
+database_name = "quickserve"
 
 # Use the Route 53 zone ID when DNS is managed in this AWS account. Otherwise,
 # leave it null and provide a validated eu-west-1 ACM certificate ARN.
@@ -14,6 +15,10 @@ email_reply_to = "support@quickserve.com.ng"
 monnify_webhook_ips = "replace-with-official-monnify-ip-list"
 
 monthly_budget_usd = 250
+
+# Keep disabled until Monnify issues production credentials and the runtime
+# secret contains the four MONNIFY_* keys documented in README.md.
+enable_monnify = false
 
 # First apply must remain false. Enable only after pushing image_tag, populating
 # both secrets, creating least-privilege DB roles, and running migrations.
