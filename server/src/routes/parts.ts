@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { randomUUID } from "crypto";
-import { query } from "../db";
+import { query, withClient } from "../db";
 import { requireAuthenticated, requireRoles } from "../middleware/auth";
 import { createNotification } from "../services/notifications";
 import { publicPartImageUrl, sendPartImage } from "../utils/partImages";
@@ -33,6 +33,95 @@ function toNullableInt(value: unknown): number | null {
     if (Number.isFinite(parsed)) return parsed;
   }
   return null;
+}
+
+const PART_QUALITIES = new Set([
+  "excellent",
+  "good",
+  "fair",
+  "needs_refurbishment",
+]);
+
+type PartCompatibility = {
+  make: string;
+  model: string;
+  year: number;
+  trim: string | null;
+};
+
+function normalizeQuality(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return PART_QUALITIES.has(normalized) ? normalized : null;
+}
+
+function normalizeCompatibilities(value: unknown): {
+  items: PartCompatibility[];
+  error?: string;
+} {
+  if (value === undefined || value === null) return { items: [] };
+  if (!Array.isArray(value)) {
+    return { items: [], error: "compatibilities must be an array" };
+  }
+  if (value.length > 100) {
+    return { items: [], error: "A part can have at most 100 compatible vehicles" };
+  }
+
+  const items: PartCompatibility[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      return { items: [], error: "Each compatibility must be an object" };
+    }
+    const input = entry as Record<string, unknown>;
+    const make = typeof input.make === "string" ? input.make.trim() : "";
+    const model = typeof input.model === "string" ? input.model.trim() : "";
+    const trim = typeof input.trim === "string" && input.trim.trim()
+      ? input.trim.trim()
+      : null;
+    const year = toNullableInt(input.year);
+    if (!make || !model || !year || year < 1900 || year > 2200) {
+      return {
+        items: [],
+        error: "Each compatibility requires a valid make, model, and year",
+      };
+    }
+    if (make.length > 80 || model.length > 100 || (trim?.length || 0) > 100) {
+      return { items: [], error: "Vehicle compatibility values are too long" };
+    }
+    const key = `${make.toLowerCase()}|${model.toLowerCase()}|${year}|${(trim || "").toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push({ make, model, year, trim });
+  }
+  return { items };
+}
+
+async function loadPartCompatibilities(
+  partIds: string[],
+): Promise<Map<string, PartCompatibility[]>> {
+  const byPart = new Map<string, PartCompatibility[]>();
+  if (partIds.length === 0) return byPart;
+  const result = await query<{
+    part_id: string;
+    make: string;
+    model: string;
+    year: number;
+    trim: string | null;
+  }>(
+    `SELECT part_id, make, model, year, trim
+     FROM part_compatibilities
+     WHERE part_id = ANY($1::text[])
+     ORDER BY make, model, year, trim NULLS FIRST`,
+    [partIds],
+  );
+  for (const row of result.rows) {
+    const current = byPart.get(row.part_id) || [];
+    current.push({ make: row.make, model: row.model, year: row.year, trim: row.trim });
+    byPart.set(row.part_id, current);
+  }
+  return byPart;
 }
 
 async function safeNotify(log: Request["log"], task: () => Promise<void>): Promise<void> {
@@ -189,6 +278,7 @@ router.get("/search", async (req: Request, res: Response) => {
       p.user_id,
       p.price_ngn,
       p.stock_qty,
+      p.quality,
       p.role,
       COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name
      FROM parts p
@@ -198,7 +288,15 @@ router.get("/search", async (req: Request, res: Response) => {
   let i = 1;
   if (search) {
     params.push(`%${search}%`);
-    sql += ` AND (p.name ILIKE $${i} OR p.description ILIKE $${i})`;
+    sql += ` AND (
+      p.name ILIKE $${i}
+      OR p.description ILIKE $${i}
+      OR EXISTS (
+        SELECT 1 FROM part_compatibilities pc
+        WHERE pc.part_id = p.id
+          AND concat_ws(' ', pc.make, pc.model, pc.year::text, pc.trim) ILIKE $${i}
+      )
+    )`;
     i++;
   }
   if (roleFilter) {
@@ -226,6 +324,7 @@ router.get("/search", async (req: Request, res: Response) => {
     user_id: string | null;
     price_ngn: number | null;
     stock_qty: number | null;
+    quality: string | null;
     role: string | null;
     vendor_name: string | null;
   }> = [];
@@ -238,6 +337,7 @@ router.get("/search", async (req: Request, res: Response) => {
       user_id: string | null;
       price_ngn: number | null;
       stock_qty: number | null;
+      quality: string | null;
       role: string | null;
       vendor_name: string | null;
     }>(sql, params);
@@ -246,6 +346,7 @@ router.get("/search", async (req: Request, res: Response) => {
     if (!isDbColumnError(err)) throw err;
     const legacySql = sql
       .replace("p.user_id,", "")
+      .replace("p.quality,", "")
       .replace("COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name", "NULL::text AS vendor_name")
       .replace("p.price_ngn, p.stock_qty,", "")
       .replace("LEFT JOIN users u ON u.id = p.user_id", "")
@@ -264,8 +365,10 @@ router.get("/search", async (req: Request, res: Response) => {
       user_id: null,
       price_ngn: null,
       stock_qty: null,
+      quality: null,
     }));
   }
+  const compatibilities = await loadPartCompatibilities(rows.map((row) => row.id));
   log.debug(
     { query: search, role: roleFilter, userId: userIdFilter, count: rows.length },
     "Parts search",
@@ -285,6 +388,8 @@ router.get("/search", async (req: Request, res: Response) => {
         imageUrl,
         priceNgn: row.price_ngn,
         stockQty: row.stock_qty,
+        quality: row.quality,
+        compatibilities: compatibilities.get(row.id) || [],
       };
     }),
   });
@@ -301,7 +406,7 @@ router.get("/:partId/image", async (req: Request, res: Response) => {
 
 router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, res: Response) => {
   const log = req.log;
-  const { userId, name, description, imageUrl, role, priceNgn, stockQty } = req.body as {
+  const { userId, name, description, imageUrl, role, priceNgn, stockQty, quality, compatibilities } = req.body as {
     userId?: string;
     name?: string;
     description?: string;
@@ -309,6 +414,8 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
     role?: string;
     priceNgn?: number | string;
     stockQty?: number | string;
+    quality?: string;
+    compatibilities?: unknown;
   };
 
   const normalizedName = typeof name === "string" ? name.trim() : "";
@@ -322,6 +429,8 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
   const normalizedRole = req.user?.role === "vendor" ? "vendor" : requestedRole;
   const normalizedPriceNgn = toNullableInt(priceNgn);
   const normalizedStockQty = toNullableInt(stockQty);
+  const normalizedQuality = normalizeQuality(quality);
+  const normalizedCompatibilities = normalizeCompatibilities(compatibilities);
 
   if (!normalizedName) {
     return res.status(400).json({ ok: false, message: "name is required" });
@@ -337,30 +446,54 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
   if (normalizedStockQty !== null && normalizedStockQty < 0) {
     return res.status(400).json({ ok: false, message: "stockQty cannot be negative" });
   }
+  if (quality !== undefined && !normalizedQuality) {
+    return res.status(400).json({ ok: false, message: "Invalid part quality" });
+  }
+  if (normalizedCompatibilities.error) {
+    return res.status(400).json({ ok: false, message: normalizedCompatibilities.error });
+  }
 
   const id = genId("part");
   try {
-    try {
-      await query(
-        "INSERT INTO parts (id, name, description, image_url, user_id, price_ngn, stock_qty, role) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        [
-          id,
-          normalizedName,
-          normalizedDescription || null,
-          normalizedImageUrl,
-          normalizedUserId,
-          normalizedPriceNgn,
-          normalizedStockQty,
-          normalizedRole,
-        ],
-      );
-    } catch (err) {
-      if (!isDbColumnError(err)) throw err;
-      await query(
-        "INSERT INTO parts (id, name, description, image_url, role) VALUES ($1, $2, $3, $4, $5)",
-        [id, normalizedName, normalizedDescription || null, normalizedImageUrl, normalizedRole],
-      );
-    }
+    await withClient(async (client) => {
+      await client.query("BEGIN");
+      try {
+        await client.query(
+          `INSERT INTO parts (
+             id, name, description, image_url, user_id, price_ngn, stock_qty, quality, role
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            id,
+            normalizedName,
+            normalizedDescription || null,
+            normalizedImageUrl,
+            normalizedUserId,
+            normalizedPriceNgn,
+            normalizedStockQty,
+            normalizedQuality,
+            normalizedRole,
+          ],
+        );
+        for (const compatibility of normalizedCompatibilities.items) {
+          await client.query(
+            `INSERT INTO part_compatibilities (id, part_id, make, model, year, trim)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              genId("fit"),
+              id,
+              compatibility.make,
+              compatibility.model,
+              compatibility.year,
+              compatibility.trim,
+            ],
+          );
+        }
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    });
     await safeNotify(log, async () => {
       if (normalizedRole !== "vendor" || !normalizedUserId) return;
 
@@ -383,6 +516,8 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
       imageUrl: publicPartImageUrl(req, id, normalizedImageUrl),
       priceNgn: normalizedPriceNgn,
       stockQty: normalizedStockQty,
+      quality: normalizedQuality,
+      compatibilities: normalizedCompatibilities.items,
       role: normalizedRole,
     });
   } catch (err) {
@@ -508,12 +643,14 @@ router.post("/:partId/bargain", requireAuthenticated, async (req: Request, res: 
 router.patch("/:partId", requireAuthenticated, async (req: Request, res: Response) => {
   const partId = String(req.params.partId);
   const log = req.log;
-  const { name, description, imageUrl, priceNgn, stockQty } = req.body as {
+  const { name, description, imageUrl, priceNgn, stockQty, quality, compatibilities } = req.body as {
     name?: string;
     description?: string;
     imageUrl?: string;
     priceNgn?: number | string;
     stockQty?: number | string;
+    quality?: string | null;
+    compatibilities?: unknown;
   };
 
   const normalizedName = typeof name === "string" ? name.trim() : undefined;
@@ -523,6 +660,9 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
     typeof imageUrl === "string" ? imageUrl.trim() : undefined;
   const normalizedPriceNgn = toNullableInt(priceNgn);
   const normalizedStockQty = toNullableInt(stockQty);
+  const normalizedQuality = normalizeQuality(quality);
+  const hasCompatibilities = Object.prototype.hasOwnProperty.call(req.body, "compatibilities");
+  const normalizedCompatibilities = normalizeCompatibilities(compatibilities);
 
   const ownerResult = await query<{ user_id: string | null }>(
     "SELECT user_id FROM parts WHERE id = $1 LIMIT 1",
@@ -540,6 +680,12 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
   }
   if (normalizedStockQty !== null && normalizedStockQty < 0) {
     return res.status(400).json({ ok: false, message: "stockQty cannot be negative" });
+  }
+  if (quality !== undefined && quality !== null && !normalizedQuality) {
+    return res.status(400).json({ ok: false, message: "Invalid part quality" });
+  }
+  if (hasCompatibilities && normalizedCompatibilities.error) {
+    return res.status(400).json({ ok: false, message: normalizedCompatibilities.error });
   }
 
   const fields: string[] = [];
@@ -569,76 +715,104 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
     fields.push(`stock_qty = $${index++}`);
     values.push(normalizedStockQty);
   }
+  if (quality !== undefined) {
+    fields.push(`quality = $${index++}`);
+    values.push(normalizedQuality);
+  }
 
-  if (!fields.length) {
+  if (!fields.length && !hasCompatibilities) {
     return res.status(400).json({ ok: false, message: "No fields to update" });
   }
 
-  values.push(partId);
-
   try {
-    let rows: Array<{
-      id: string;
-      name: string;
-      description: string | null;
-      image_url: string | null;
-      price_ngn: number | null;
-      stock_qty: number | null;
-      role: string | null;
-    }> = [];
-    try {
-      const result = await query<{
-        id: string;
-        name: string;
-        description: string | null;
-        image_url: string | null;
-        price_ngn: number | null;
-        stock_qty: number | null;
-        role: string | null;
-      }>(
-        `UPDATE parts
-         SET ${fields.join(", ")}
-         WHERE id = $${index}
-         RETURNING id, name, description, image_url, price_ngn, stock_qty, role`,
-        values,
-      );
-      rows = result.rows;
-    } catch (err) {
-      if (!isDbColumnError(err)) throw err;
-      const legacyFields = fields
-        .filter((field) => !field.startsWith("price_ngn") && !field.startsWith("stock_qty"));
-      const legacyValues = values.slice(0, values.length - 1);
-      legacyValues.push(partId);
-      if (!legacyFields.length) {
-        return res.status(400).json({
-          ok: false,
-          message: "This server schema does not support price/stock updates yet.",
-        });
-      }
-      const result = await query<{
-        id: string;
-        name: string;
-        description: string | null;
-        image_url: string | null;
-        role: string | null;
-      }>(
-        `UPDATE parts
-         SET ${legacyFields.join(", ")}
-         WHERE id = $${legacyFields.length + 1}
-         RETURNING id, name, description, image_url, role`,
-        legacyValues,
-      );
-      rows = result.rows.map((row) => ({
-        ...row,
-        price_ngn: null,
-        stock_qty: null,
-      }));
-    }
+    const part = await withClient(async (client) => {
+      await client.query("BEGIN");
+      try {
+        let row: {
+          id: string;
+          name: string;
+          description: string | null;
+          image_url: string | null;
+          price_ngn: number | null;
+          stock_qty: number | null;
+          quality: string | null;
+          role: string | null;
+        } | undefined;
 
-    const part = rows[0];
+        if (fields.length > 0) {
+          const updateValues = [...values, partId];
+          const result = await client.query<{
+            id: string;
+            name: string;
+            description: string | null;
+            image_url: string | null;
+            price_ngn: number | null;
+            stock_qty: number | null;
+            quality: string | null;
+            role: string | null;
+          }>(
+            `UPDATE parts
+             SET ${fields.join(", ")}
+             WHERE id = $${index}
+             RETURNING id, name, description, image_url, price_ngn, stock_qty, quality, role`,
+            updateValues,
+          );
+          row = result.rows[0];
+        } else {
+          const result = await client.query<{
+            id: string;
+            name: string;
+            description: string | null;
+            image_url: string | null;
+            price_ngn: number | null;
+            stock_qty: number | null;
+            quality: string | null;
+            role: string | null;
+          }>(
+            `SELECT id, name, description, image_url, price_ngn, stock_qty, quality, role
+             FROM parts WHERE id = $1`,
+            [partId],
+          );
+          row = result.rows[0];
+        }
+
+        if (!row) {
+          await client.query("ROLLBACK");
+          return undefined;
+        }
+
+        if (hasCompatibilities) {
+          await client.query("DELETE FROM part_compatibilities WHERE part_id = $1", [partId]);
+          for (const compatibility of normalizedCompatibilities.items) {
+            await client.query(
+              `INSERT INTO part_compatibilities (id, part_id, make, model, year, trim)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [
+                genId("fit"),
+                partId,
+                compatibility.make,
+                compatibility.model,
+                compatibility.year,
+                compatibility.trim,
+              ],
+            );
+          }
+        }
+
+        await client.query("COMMIT");
+        return row;
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    });
+
     if (!part) {
       return res.status(404).json({ ok: false, message: "Part not found" });
     }
+    const currentCompatibilities = hasCompatibilities
+      ? normalizedCompatibilities.items
+      : (await loadPartCompatibilities([partId])).get(partId) || [];
 
     log.info({ partId }, "Part updated");
     return res.json({
@@ -649,6 +823,8 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
         imageUrl: publicPartImageUrl(req, part.id, part.image_url),
         priceNgn: part.price_ngn,
         stockQty: part.stock_qty,
+        quality: part.quality,
+        compatibilities: currentCompatibilities,
       },
     });
   } catch (err) {
@@ -1447,6 +1623,7 @@ router.get("/:partId", async (req: Request, res: Response) => {
     vendor_name: string | null;
     price_ngn: number | null;
     stock_qty: number | null;
+    quality: string | null;
     role: string | null;
     created_at: string;
   }> = [];
@@ -1460,6 +1637,7 @@ router.get("/:partId", async (req: Request, res: Response) => {
       vendor_name: string | null;
       price_ngn: number | null;
       stock_qty: number | null;
+      quality: string | null;
       role: string | null;
       created_at: string;
     }>(
@@ -1475,6 +1653,7 @@ router.get("/:partId", async (req: Request, res: Response) => {
          COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name,
          p.price_ngn,
          p.stock_qty,
+         p.quality,
          p.role,
          p.created_at
        FROM parts p
@@ -1514,6 +1693,7 @@ router.get("/:partId", async (req: Request, res: Response) => {
       user_id: null,
       price_ngn: null,
       stock_qty: null,
+      quality: null,
     }));
   }
 
@@ -1521,6 +1701,7 @@ router.get("/:partId", async (req: Request, res: Response) => {
   if (!part) {
     return res.status(404).json({ ok: false, message: "Part not found" });
   }
+  const compatibilities = (await loadPartCompatibilities([part.id])).get(part.id) || [];
 
   return res.json({
     ok: true,
@@ -1532,6 +1713,8 @@ router.get("/:partId", async (req: Request, res: Response) => {
       imageUrl: publicPartImageUrl(req, part.id, part.image_url),
       priceNgn: part.price_ngn,
       stockQty: part.stock_qty,
+      quality: part.quality,
+      compatibilities,
     },
   });
 });

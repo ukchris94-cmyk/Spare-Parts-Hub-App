@@ -4,16 +4,18 @@ import { env } from "../config/env";
 import { logger } from "../logger";
 
 let transporter: Promise<Transporter> | undefined;
+const GMAIL_SMTP_HOST = "smtp.gmail.com";
+const GMAIL_SMTP_PORT = 465;
 
 async function getTransporter(): Promise<Transporter> {
   if (!transporter) {
     transporter = (async () => {
-      const addresses = env.SMTP_FORCE_IPV4 ? await resolve4(env.SMTP_HOST) : [];
-      const host = addresses[0] || env.SMTP_HOST;
+      const addresses = env.SMTP_FORCE_IPV4 ? await resolve4(GMAIL_SMTP_HOST) : [];
+      const host = addresses[0] || GMAIL_SMTP_HOST;
       return nodemailer.createTransport({
         host,
-        port: env.SMTP_PORT,
-        secure: env.SMTP_SECURE,
+        port: GMAIL_SMTP_PORT,
+        secure: true,
         auth: {
           user: env.SMTP_USER,
           pass: env.SMTP_PASS,
@@ -23,7 +25,7 @@ async function getTransporter(): Promise<Transporter> {
         socketTimeout: 20_000,
         tls: {
           minVersion: "TLSv1.2",
-          servername: env.SMTP_HOST,
+          servername: GMAIL_SMTP_HOST,
         },
       });
     })().catch((error) => {
