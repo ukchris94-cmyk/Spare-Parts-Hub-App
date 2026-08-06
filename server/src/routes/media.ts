@@ -1,6 +1,6 @@
 import { Request, Response, Router } from "express";
 import { requireAuthenticated } from "../middleware/auth";
-import { query } from "../db";
+import { query, withClient } from "../db";
 import {
   completeMediaUpload,
   createMediaUpload,
@@ -11,6 +11,7 @@ import {
 } from "../services/objectStorage";
 
 const router = Router();
+const MAX_PART_IMAGES = 8;
 
 function isPrivileged(req: Request): boolean {
   return ["admin", "staff"].includes(req.user?.role || "");
@@ -30,7 +31,11 @@ router.get("/:id/content", async (req: Request, res: Response) => {
     return res.status(404).json({ ok: false, message: "Image not found" });
   }
   const published = await query<{ found: boolean }>(
-    "SELECT EXISTS(SELECT 1 FROM parts WHERE id = $1 AND image_url = $2) AS found",
+    `SELECT EXISTS(
+       SELECT 1 FROM parts WHERE id = $1 AND image_url = $2
+       UNION ALL
+       SELECT 1 FROM part_images WHERE part_id = $1 AND storage_uri = $2
+     ) AS found`,
     [partId, s3StorageUri(media)]
   );
   if (!published.rows[0]?.found) {
@@ -55,13 +60,34 @@ router.post("/uploads", requireAuthenticated, async (req: Request, res: Response
     return res.status(400).json({ ok: false, message: "partId is required for a part image" });
   }
   if (partId) {
-    const owner = await query<{ user_id: string | null }>(
-      "SELECT user_id FROM parts WHERE id = $1 LIMIT 1",
+    const owner = await query<{ user_id: string | null; image_count: string }>(
+      `SELECT
+         p.user_id,
+         (
+           SELECT COUNT(*) FROM part_images pi WHERE pi.part_id = p.id
+         ) + CASE
+           WHEN p.image_url IS NOT NULL
+             AND p.image_url <> ''
+             AND NOT EXISTS (
+               SELECT 1 FROM part_images pi
+               WHERE pi.part_id = p.id AND pi.storage_uri = p.image_url
+             )
+           THEN 1 ELSE 0
+         END AS image_count
+       FROM parts p
+       WHERE p.id = $1
+       LIMIT 1`,
       [partId]
     );
     if (!owner.rows[0]) return res.status(404).json({ ok: false, message: "Part not found" });
     if (!isPrivileged(req) && owner.rows[0].user_id !== req.user.id) {
       return res.status(403).json({ ok: false, message: "Not authorized to update this part" });
+    }
+    if (purpose === "part_image" && Number(owner.rows[0].image_count) >= MAX_PART_IMAGES) {
+      return res.status(409).json({
+        ok: false,
+        message: `A product can have at most ${MAX_PART_IMAGES} photos`,
+      });
     }
   }
 
@@ -104,7 +130,59 @@ router.post("/uploads/:id/complete", requireAuthenticated, async (req: Request, 
     const accessUrl = `${publicApiBase(req)}/media/${encodeURIComponent(completed.id)}/content`;
 
     if (partId && completed.purpose === "part_image") {
-      await query("UPDATE parts SET image_url = $1 WHERE id = $2", [s3StorageUri(completed), partId]);
+      const storageUri = s3StorageUri(completed);
+      await withClient(async (client) => {
+        await client.query("BEGIN");
+        try {
+          await client.query("SELECT id FROM parts WHERE id = $1 FOR UPDATE", [partId]);
+          const existing = await client.query(
+            "SELECT 1 FROM part_images WHERE media_id = $1 LIMIT 1",
+            [completed.id],
+          );
+          if (!existing.rows[0]) {
+            const count = await client.query<{ count: string }>(
+              `SELECT (
+                 (SELECT COUNT(*) FROM part_images pi WHERE pi.part_id = p.id)
+                 + CASE
+                   WHEN p.image_url IS NOT NULL
+                     AND p.image_url <> ''
+                     AND NOT EXISTS (
+                       SELECT 1 FROM part_images pi
+                       WHERE pi.part_id = p.id AND pi.storage_uri = p.image_url
+                     )
+                   THEN 1 ELSE 0
+                 END
+               )::text AS count
+               FROM parts p
+               WHERE p.id = $1`,
+              [partId],
+            );
+            if (Number(count.rows[0]?.count || 0) >= MAX_PART_IMAGES) {
+              throw new Error(`A product can have at most ${MAX_PART_IMAGES} photos`);
+            }
+            await client.query(
+              `INSERT INTO part_images (media_id, part_id, storage_uri, sort_order)
+               SELECT $1, $2, $3, COALESCE(MAX(sort_order), -1) + 1
+               FROM part_images
+               WHERE part_id = $2`,
+              [completed.id, partId, storageUri],
+            );
+          }
+          await client.query(
+            `UPDATE parts
+             SET image_url = CASE
+               WHEN image_url IS NULL OR image_url = '' THEN $1
+               ELSE image_url
+             END
+             WHERE id = $2`,
+            [storageUri, partId],
+          );
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        }
+      });
     }
     if (completed.purpose === "onboarding_image") {
       await query(
@@ -152,11 +230,44 @@ router.delete("/:id", requireAuthenticated, async (req: Request, res: Response) 
   if (!req.user) return res.status(401).json({ ok: false, message: "Authentication required" });
   const media = await getMediaObject(String(req.params.id));
   if (!media) return res.status(404).json({ ok: false, message: "Media not found" });
-  if (!isPrivileged(req) && media.owner_id !== req.user.id) {
+  const storageUri = s3StorageUri(media);
+  const linkedParts = media.purpose === "part_image"
+    ? await query<{ id: string; user_id: string | null }>(
+        `SELECT DISTINCT p.id, p.user_id
+         FROM parts p
+         LEFT JOIN part_images pi ON pi.part_id = p.id
+         WHERE p.image_url = $1 OR pi.media_id = $2`,
+        [storageUri, media.id],
+      )
+    : { rows: [] as Array<{ id: string; user_id: string | null }> };
+  const ownsLinkedPart = linkedParts.rows.some((part) => part.user_id === req.user?.id);
+  if (!isPrivileged(req) && media.owner_id !== req.user.id && !ownsLinkedPart) {
     return res.status(403).json({ ok: false, message: "Not authorized" });
   }
   await deleteMediaObject(media);
-  await query("DELETE FROM onboarding_images WHERE id = $1", [media.id]);
+  await withClient(async (client) => {
+    await client.query("BEGIN");
+    try {
+      await client.query("DELETE FROM onboarding_images WHERE id = $1", [media.id]);
+      await client.query("DELETE FROM part_images WHERE media_id = $1", [media.id]);
+      await client.query(
+        `UPDATE parts p
+         SET image_url = (
+           SELECT pi.storage_uri
+           FROM part_images pi
+           WHERE pi.part_id = p.id
+           ORDER BY pi.sort_order, pi.created_at
+           LIMIT 1
+         )
+         WHERE p.image_url = $1`,
+        [storageUri],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
+  });
   return res.json({ ok: true });
 });
 

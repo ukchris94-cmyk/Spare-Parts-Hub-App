@@ -1,11 +1,12 @@
 import { Request, Response } from "express";
+import { query } from "../db";
 import { mediaReadUrlForStorageUri } from "../services/objectStorage";
 
 const MAX_PART_IMAGE_BYTES = 8 * 1024 * 1024;
 const INLINE_IMAGE_PATTERN =
   /^data:(image\/(?:avif|gif|heic|heif|jpeg|jpg|png|webp));base64,([a-z0-9+/=\r\n]+)$/i;
 
-function publicApiBaseUrl(req: Request): string {
+export function publicApiBaseUrl(req: Request): string {
   const configured = process.env.PUBLIC_API_URL?.trim().replace(/\/+$/, "");
   if (configured) return configured;
 
@@ -26,6 +27,61 @@ function publicApiBaseUrl(req: Request): string {
         : "http";
 
   return `${protocol}://${host}/api`;
+}
+
+export type PublicPartImage = {
+  id: string | null;
+  url: string;
+  isPrimary: boolean;
+};
+
+export async function loadPartImageGalleries(
+  req: Request,
+  parts: Array<{ id: string; image_url: string | null }>,
+): Promise<Map<string, PublicPartImage[]>> {
+  const galleries = new Map<string, PublicPartImage[]>();
+  if (parts.length === 0) return galleries;
+
+  const result = await query<{
+    part_id: string;
+    media_id: string;
+    storage_uri: string;
+  }>(
+    `SELECT pi.part_id, pi.media_id, pi.storage_uri
+     FROM part_images pi
+     JOIN media_objects mo ON mo.id = pi.media_id
+     WHERE pi.part_id = ANY($1::text[])
+       AND mo.status = 'verified'
+       AND mo.deleted_at IS NULL
+     ORDER BY pi.part_id, pi.sort_order, pi.created_at`,
+    [parts.map((part) => part.id)],
+  );
+
+  const primaryByPart = new Map(parts.map((part) => [part.id, part.image_url]));
+  for (const row of result.rows) {
+    const current = galleries.get(row.part_id) || [];
+    current.push({
+      id: row.media_id,
+      url: `${publicApiBaseUrl(req)}/media/${encodeURIComponent(row.media_id)}/content`,
+      isPrimary: primaryByPart.get(row.part_id) === row.storage_uri,
+    });
+    galleries.set(row.part_id, current);
+  }
+
+  for (const part of parts) {
+    const current = galleries.get(part.id) || [];
+    if (part.image_url && !current.some((image) => image.isPrimary)) {
+      current.unshift({
+        id: null,
+        url: publicPartImageUrl(req, part.id, part.image_url) || "",
+        isPrimary: true,
+      });
+    }
+    current.sort((left, right) => Number(right.isPrimary) - Number(left.isPrimary));
+    galleries.set(part.id, current.filter((image) => image.url));
+  }
+
+  return galleries;
 }
 
 export function publicPartImageUrl(

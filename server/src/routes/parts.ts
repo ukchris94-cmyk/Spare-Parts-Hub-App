@@ -3,7 +3,11 @@ import { randomUUID } from "crypto";
 import { query, withClient } from "../db";
 import { requireAuthenticated, requireRoles } from "../middleware/auth";
 import { createNotification } from "../services/notifications";
-import { publicPartImageUrl, sendPartImage } from "../utils/partImages";
+import {
+  loadPartImageGalleries,
+  publicPartImageUrl,
+  sendPartImage,
+} from "../utils/partImages";
 
 const router = Router();
 
@@ -33,6 +37,12 @@ function toNullableInt(value: unknown): number | null {
     if (Number.isFinite(parsed)) return parsed;
   }
   return null;
+}
+
+function queryInt(value: unknown, fallback: number, minimum: number, maximum: number): number {
+  const parsed = typeof value === "string" ? Number.parseInt(value, 10) : Number.NaN;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, parsed));
 }
 
 const PART_QUALITIES = new Set([
@@ -253,11 +263,13 @@ async function loadBargainMessages(offerId: string) {
 }
 
 router.get("/search", async (req: Request, res: Response) => {
-  const { query: q, role, category, userId } = req.query as {
+  const { query: q, role, category, userId, page: rawPage, pageSize: rawPageSize } = req.query as {
     query?: string;
     role?: string;
     category?: string;
     userId?: string;
+    page?: string;
+    pageSize?: string;
   };
   const log = req.log;
   const search = typeof q === "string" ? q.trim() : "";
@@ -265,6 +277,9 @@ router.get("/search", async (req: Request, res: Response) => {
   const userIdFilter = typeof userId === "string" ? userId.trim() : null;
   const categoryFilter =
     typeof category === "string" ? category.trim().toLowerCase() : "";
+  const page = queryInt(rawPage, 1, 1, 100_000);
+  const pageSize = queryInt(rawPageSize, 50, 1, 100);
+  const offset = (page - 1) * pageSize;
 
   let sql =
     `SELECT
@@ -284,7 +299,7 @@ router.get("/search", async (req: Request, res: Response) => {
      FROM parts p
      LEFT JOIN users u ON u.id = p.user_id
      WHERE 1=1`;
-  const params: string[] = [];
+  const params: unknown[] = [];
   let i = 1;
   if (search) {
     params.push(`%${search}%`);
@@ -314,7 +329,8 @@ router.get("/search", async (req: Request, res: Response) => {
     sql += ` AND (p.name ILIKE $${i} OR p.description ILIKE $${i})`;
     i++;
   }
-  sql += " ORDER BY p.name LIMIT 50";
+  params.push(pageSize + 1, offset);
+  sql += ` ORDER BY p.name, p.id LIMIT $${i} OFFSET $${i + 1}`;
 
   let rows: Array<{
     id: string;
@@ -368,7 +384,10 @@ router.get("/search", async (req: Request, res: Response) => {
       quality: null,
     }));
   }
+  const hasMore = rows.length > pageSize;
+  rows = rows.slice(0, pageSize);
   const compatibilities = await loadPartCompatibilities(rows.map((row) => row.id));
+  const imageGalleries = await loadPartImageGalleries(req, rows);
   log.debug(
     { query: search, role: roleFilter, userId: userIdFilter, count: rows.length },
     "Parts search",
@@ -389,9 +408,16 @@ router.get("/search", async (req: Request, res: Response) => {
         priceNgn: row.price_ngn,
         stockQty: row.stock_qty,
         quality: row.quality,
+        images: imageGalleries.get(row.id) || [],
         compatibilities: compatibilities.get(row.id) || [],
       };
     }),
+    pagination: {
+      page,
+      pageSize,
+      hasMore,
+      nextPage: hasMore ? page + 1 : null,
+    },
   });
 });
 
@@ -402,6 +428,33 @@ router.get("/:partId/image", async (req: Request, res: Response) => {
     [partId],
   );
   return await sendPartImage(res, result.rows[0]?.image_url ?? null);
+});
+
+router.delete("/:partId/images/primary", requireAuthenticated, async (req: Request, res: Response) => {
+  const partId = String(req.params.partId);
+  const owner = await query<{ user_id: string | null }>(
+    "SELECT user_id FROM parts WHERE id = $1 LIMIT 1",
+    [partId],
+  );
+  if (!owner.rows[0]) {
+    return res.status(404).json({ ok: false, message: "Part not found" });
+  }
+  if (!isPrivileged(req) && owner.rows[0].user_id !== req.user?.id) {
+    return res.status(403).json({ ok: false, message: "Not authorized to update this part" });
+  }
+  await query(
+    `UPDATE parts
+     SET image_url = (
+       SELECT storage_uri
+       FROM part_images
+       WHERE part_id = $1 AND storage_uri <> COALESCE(parts.image_url, '')
+       ORDER BY sort_order, created_at
+       LIMIT 1
+     )
+     WHERE id = $1`,
+    [partId],
+  );
+  return res.json({ ok: true });
 });
 
 router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, res: Response) => {
@@ -1702,6 +1755,7 @@ router.get("/:partId", async (req: Request, res: Response) => {
     return res.status(404).json({ ok: false, message: "Part not found" });
   }
   const compatibilities = (await loadPartCompatibilities([part.id])).get(part.id) || [];
+  const images = (await loadPartImageGalleries(req, [part])).get(part.id) || [];
 
   return res.json({
     ok: true,
@@ -1714,6 +1768,7 @@ router.get("/:partId", async (req: Request, res: Response) => {
       priceNgn: part.price_ngn,
       stockQty: part.stock_qty,
       quality: part.quality,
+      images,
       compatibilities,
     },
   });
