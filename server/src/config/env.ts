@@ -26,6 +26,17 @@ const schema = z
     ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().min(300).max(86400).default(900),
     REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
     ALLOW_LEGACY_AUTH_TOKENS: booleanString.optional(),
+    ALLOW_LEGACY_PUBLIC_EMAIL_LOGIN: booleanString.default(true),
+    PHONE_AUTH_ENABLED: booleanString.default(false),
+    MESSAGING_PROVIDER: z.enum(["disabled", "termii"]).default("disabled"),
+    TERMII_BASE_URL: z.string().url().optional(),
+    TERMII_API_KEY: z.string().trim().optional(),
+    TERMII_SECRET_KEY: z.string().min(16).optional(),
+    TERMII_SENDER_ID: z.string().trim().min(3).max(11).optional(),
+    TERMII_WHATSAPP_DEVICE_ID: z.string().trim().optional(),
+    TERMII_AUTH_TEMPLATE_ID: z.string().trim().optional(),
+    TERMII_PAYMENT_RECEIPT_TEMPLATE_ID: z.string().trim().optional(),
+    AUTH_CHALLENGE_HMAC_SECRET: z.string().min(32).optional(),
     APP_DEEP_LINK_SCHEME: z.string().regex(/^[a-z][a-z0-9+.-]*$/i).default("sparepartshubmobileclean"),
     AWS_REGION: z.string().trim().optional(),
     EMAIL_FROM: z.string().trim().optional(),
@@ -45,6 +56,9 @@ const schema = z
     MONNIFY_CONTRACT_CODE: z.string().trim().optional(),
     MONNIFY_REDIRECT_URL: z.string().url().optional(),
     MONNIFY_WEBHOOK_IPS: z.string().trim().optional(),
+    MONNIFY_RELAY_EMAIL_APPROVED: booleanString.default(false),
+    PAYMENT_RELAY_EMAIL_DOMAIN: z.string().trim().optional(),
+    PAYMENT_RELAY_EMAIL_SECRET: z.string().min(32).optional(),
     MONNIFY_DISBURSEMENTS_ENABLED: booleanString.optional(),
     MONNIFY_DISBURSEMENT_SOURCE_ACCOUNT: z.string().trim().optional(),
     MEDIA_BUCKET: z.string().trim().optional(),
@@ -123,6 +137,44 @@ const schema = z
               code: "custom",
               path: [name],
               message: `${name} is required when PAYMENTS_ENABLED=true`,
+            });
+          }
+        }
+        if (value.PHONE_AUTH_ENABLED) {
+          const relayRequired: Array<[string, unknown]> = [
+            ["MONNIFY_RELAY_EMAIL_APPROVED", value.MONNIFY_RELAY_EMAIL_APPROVED],
+            ["PAYMENT_RELAY_EMAIL_DOMAIN", value.PAYMENT_RELAY_EMAIL_DOMAIN],
+            ["PAYMENT_RELAY_EMAIL_SECRET", value.PAYMENT_RELAY_EMAIL_SECRET],
+            ["TERMII_PAYMENT_RECEIPT_TEMPLATE_ID", value.TERMII_PAYMENT_RECEIPT_TEMPLATE_ID],
+          ];
+          for (const [name, configured] of relayRequired) {
+            if (!configured) {
+              context.addIssue({
+                code: "custom",
+                path: [name],
+                message: `${name} is required for phone-only Monnify checkout`,
+              });
+            }
+          }
+        }
+      }
+      if (value.PHONE_AUTH_ENABLED) {
+        const messagingRequired: Array<[string, unknown]> = [
+          ["MESSAGING_PROVIDER", value.MESSAGING_PROVIDER === "termii"],
+          ["TERMII_BASE_URL", value.TERMII_BASE_URL],
+          ["TERMII_API_KEY", value.TERMII_API_KEY],
+          ["TERMII_SECRET_KEY", value.TERMII_SECRET_KEY],
+          ["TERMII_SENDER_ID", value.TERMII_SENDER_ID],
+          ["TERMII_WHATSAPP_DEVICE_ID", value.TERMII_WHATSAPP_DEVICE_ID],
+          ["TERMII_AUTH_TEMPLATE_ID", value.TERMII_AUTH_TEMPLATE_ID],
+          ["AUTH_CHALLENGE_HMAC_SECRET", value.AUTH_CHALLENGE_HMAC_SECRET],
+        ];
+        for (const [name, configured] of messagingRequired) {
+          if (!configured) {
+            context.addIssue({
+              code: "custom",
+              path: [name],
+              message: `${name} is required when PHONE_AUTH_ENABLED=true`,
             });
           }
         }

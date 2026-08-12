@@ -25,6 +25,7 @@ import {
 } from "../services/payments/payouts";
 import { reconcileRefund } from "../services/payments/refunds";
 import { calculatePaymentBreakdown } from "../services/payments/fees";
+import { paymentEmailForUser } from "../services/payments/relayIdentity";
 
 const router = Router();
 
@@ -506,6 +507,16 @@ async function finalizeAutomaticPayment(input: {
           JSON.stringify({ orderId: order.id, userId: payment.user_id }),
         ]
       );
+      await client.query(
+        `INSERT INTO outbox_events
+           (id, event_type, aggregate_type, aggregate_id, payload)
+         VALUES ($1, 'payment.receipt_requested', 'payment', $2, $3::jsonb)`,
+        [
+          genCheckoutId("evt"),
+          payment.id,
+          JSON.stringify({ paymentTransactionId: payment.id }),
+        ]
+      );
       await client.query("COMMIT");
       return { payment: updated.rows[0] || payment, orderCreated: true };
     } catch (err) {
@@ -600,7 +611,7 @@ async function createMonnifyPendingCheckout(input: {
       const provider = getPaymentProvider();
       const paymentId = genCheckoutId("pay");
       const customerResult = await client.query<{
-        email: string;
+        email: string | null;
         display_name: string;
       }>(
         `SELECT email,
@@ -611,7 +622,7 @@ async function createMonnifyPendingCheckout(input: {
         [input.user.id]
       );
       const customer = customerResult.rows[0];
-      if (!customer?.email) throw new CheckoutOrderError(403, "Customer account is not available.");
+      if (!customer) throw new CheckoutOrderError(403, "Customer account is not available.");
 
       const { rows } = await client.query<PaymentTransactionRow>(
         `INSERT INTO payment_transactions
@@ -648,7 +659,7 @@ async function createMonnifyPendingCheckout(input: {
         customer: {
           id: input.user.id,
           name: customer.display_name || "QuickServe customer",
-          email: customer.email,
+          email: paymentEmailForUser(input.user.id, customer.email),
         },
         shouldInitialize: true,
       };
@@ -662,15 +673,19 @@ async function createMonnifyPendingCheckout(input: {
 
   let customer = setup.customer;
   if (!customer) {
-    const customerResult = await query<{ email: string; display_name: string }>(
+    const customerResult = await query<{ email: string | null; display_name: string }>(
       `SELECT email,
               TRIM(CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, ''))) AS display_name
        FROM users WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
       [input.user.id]
     );
     const row = customerResult.rows[0];
-    if (!row?.email) throw new CheckoutOrderError(403, "Customer account is not available.");
-    customer = { id: input.user.id, name: row.display_name || "QuickServe customer", email: row.email };
+    if (!row) throw new CheckoutOrderError(403, "Customer account is not available.");
+    customer = {
+      id: input.user.id,
+      name: row.display_name || "QuickServe customer",
+      email: paymentEmailForUser(input.user.id, row.email),
+    };
   }
 
   const provider = getPaymentProvider(setup.payment.provider || undefined);

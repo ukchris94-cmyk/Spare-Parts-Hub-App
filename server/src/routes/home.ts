@@ -22,7 +22,10 @@ type UserRow = {
   id: string;
   first_name: string | null;
   last_name: string | null;
-  email: string;
+  email: string | null;
+  phone_e164?: string | null;
+  phone_verified_at?: Date | null;
+  whatsapp_transaction_consent_at?: Date | null;
   role: string;
 };
 
@@ -443,7 +446,7 @@ router.get("/profile", async (req: Request, res: Response) => {
     }
 
     const userResult = await query<UserRow>(
-      "SELECT id, first_name, last_name, email, role FROM users WHERE id = $1",
+      "SELECT id, first_name, last_name, email, phone_e164, phone_verified_at, whatsapp_transaction_consent_at, role FROM users WHERE id = $1",
       [userId],
     );
     const user = userResult.rows[0];
@@ -464,6 +467,9 @@ router.get("/profile", async (req: Request, res: Response) => {
           ? user.last_name.trim()
           : "",
       email: user.email,
+      phone: user.phone_e164,
+      phoneVerified: !!user.phone_verified_at,
+      whatsappTransactionConsent: !!user.whatsapp_transaction_consent_at,
       role: user.role,
     });
   } catch (err) {
@@ -503,7 +509,7 @@ router.patch("/profile", async (req: Request, res: Response) => {
       `UPDATE users
        SET first_name = $1, last_name = $2
        WHERE id = $3
-       RETURNING id, first_name, last_name, email, role`,
+       RETURNING id, first_name, last_name, email, phone_e164, phone_verified_at, whatsapp_transaction_consent_at, role`,
       [firstName, lastName || null, userId],
     );
     const user = result.rows[0];
@@ -519,6 +525,9 @@ router.patch("/profile", async (req: Request, res: Response) => {
         firstName: user.first_name ?? "",
         lastName: user.last_name ?? "",
         email: user.email,
+        phone: user.phone_e164,
+        phoneVerified: !!user.phone_verified_at,
+        whatsappTransactionConsent: !!user.whatsapp_transaction_consent_at,
         role: user.role,
       },
     });

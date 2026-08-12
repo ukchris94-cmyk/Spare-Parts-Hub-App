@@ -2,8 +2,11 @@ import { Router, Request, Response } from "express";
 import { randomUUID } from "crypto";
 import { readFile, unlink } from "fs/promises";
 import path from "path";
+import { env } from "../config/env";
 import { query } from "../db";
 import { requireRoles } from "../middleware/auth";
+import { createChallenge } from "../services/authChallenges";
+import { InvalidPhoneNumberError, maskPhone, normalizeNigerianPhone } from "../services/phoneNumbers";
 import { hashPassword } from "../services/passwords";
 import { deleteMediaObject, getMediaObject, mediaReadUrl } from "../services/objectStorage";
 
@@ -35,7 +38,8 @@ type VendorRow = {
   id: string;
   first_name: string | null;
   last_name: string | null;
-  email: string;
+  email: string | null;
+  phone_e164: string | null;
   role: string;
   verified: boolean;
   created_at: Date;
@@ -77,7 +81,8 @@ function toVendorResponse(row: VendorRow) {
     email: row.email,
     role: row.role,
     verified: row.verified,
-    displayName: name || row.email.split("@")[0] || row.email,
+    phone: row.phone_e164,
+    displayName: name || row.email?.split("@")[0] || (row.phone_e164 ? `Vendor ${row.phone_e164.slice(-4)}` : "Vendor"),
     partsCount: toCount(row.parts_count),
     missingImagesCount: toCount(row.missing_images_count),
     createdAt: row.created_at,
@@ -107,24 +112,46 @@ router.use(requireRoles("admin", "staff"));
 router.get("/vendors", async (_req: Request, res: Response) => {
   const { rows } = await query<VendorRow>(
     `SELECT
-       u.id, u.first_name, u.last_name, u.email, u.role, u.verified, u.created_at,
+       u.id, u.first_name, u.last_name, u.email, u.phone_e164, u.role, u.verified, u.created_at,
        COUNT(p.id)::int AS parts_count,
        COUNT(p.id) FILTER (WHERE p.image_url IS NULL OR p.image_url = '')::int AS missing_images_count
      FROM users u
      LEFT JOIN parts p ON p.user_id = u.id
      WHERE u.role = 'vendor'
-     GROUP BY u.id, u.first_name, u.last_name, u.email, u.role, u.verified, u.created_at
-     ORDER BY COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)), u.email`
+     GROUP BY u.id, u.first_name, u.last_name, u.email, u.phone_e164, u.role, u.verified, u.created_at
+     ORDER BY COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1), u.phone_e164), u.email NULLS LAST`
   );
 
   return res.json({ ok: true, vendors: rows.map(toVendorResponse) });
 });
 
 router.post("/vendors", async (req: Request, res: Response) => {
-  const { email, password } = req.body as { email?: string; password?: string };
-  const normalizedEmail = typeof email === "string" ? email.toLowerCase().trim() : "";
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-    return res.status(400).json({ ok: false, message: "Valid vendor email is required" });
+  if (!env.PHONE_AUTH_ENABLED) {
+    return res.status(503).json({
+      ok: false,
+      message: "Phone authentication must be configured before creating a phone-based vendor account.",
+    });
+  }
+  const { phone, password, whatsappSecurityConsent } = req.body as {
+    phone?: string;
+    password?: string;
+    whatsappSecurityConsent?: boolean;
+  };
+  if (whatsappSecurityConsent !== true) {
+    return res.status(400).json({
+      ok: false,
+      message: "Confirm that the vendor agreed to receive WhatsApp security codes.",
+    });
+  }
+
+  let phoneE164: string;
+  try {
+    phoneE164 = normalizeNigerianPhone(phone || "");
+  } catch (error) {
+    if (error instanceof InvalidPhoneNumberError) {
+      return res.status(400).json({ ok: false, message: error.message });
+    }
+    throw error;
   }
 
   const passwordError = validatePassword(password || "");
@@ -135,23 +162,48 @@ router.post("/vendors", async (req: Request, res: Response) => {
   const firstName = normalizeName(req.body?.firstName);
   const lastName = normalizeName(req.body?.lastName);
   const existing = await query<{ id: string }>(
-    "SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1",
-    [normalizedEmail]
+    "SELECT id FROM users WHERE phone_e164 = $1 AND deleted_at IS NULL LIMIT 1",
+    [phoneE164]
   );
   if (existing.rows.length > 0) {
-    return res.status(409).json({ ok: false, message: "A user with this email already exists" });
+    return res.status(409).json({ ok: false, message: "A user with this phone number already exists" });
   }
 
   const id = genId("usr");
   const passwordHash = await hashPassword(password || "");
   const { rows } = await query<VendorRow>(
-    `INSERT INTO users (id, first_name, last_name, email, password_hash, role, verified)
-     VALUES ($1, $2, $3, $4, $5, 'vendor', TRUE)
-     RETURNING id, first_name, last_name, email, role, verified, created_at`,
-    [id, firstName, lastName, normalizedEmail, passwordHash]
+    `INSERT INTO users
+       (id, first_name, last_name, phone, phone_e164, email, password_hash, role, verified,
+        whatsapp_security_consent_at)
+     VALUES ($1, $2, $3, $4, $4, NULL, $5, 'vendor', FALSE, NOW())
+     RETURNING id, first_name, last_name, email, phone_e164, role, verified, created_at`,
+    [id, firstName, lastName, phoneE164, passwordHash]
   );
 
-  return res.status(201).json({ ok: true, vendor: toVendorResponse(rows[0]) });
+  let challenge;
+  try {
+    challenge = await createChallenge({
+      userId: id,
+      purpose: "signup",
+      phoneE164,
+      req,
+      metadata: { createdByStaff: true, whatsappSecurityConsent: true },
+    });
+  } catch (error) {
+    req.log.warn({ err: error, vendorUserId: id }, "Staff-created vendor OTP delivery failed");
+    return res.status(201).json({
+      ok: true,
+      vendor: toVendorResponse(rows[0]),
+      verificationPending: true,
+      message: "Vendor created, but the verification code could not be delivered. The vendor can request another code when signing in.",
+    });
+  }
+
+  return res.status(201).json({
+    ok: true,
+    vendor: toVendorResponse(rows[0]),
+    challenge: { ...challenge, destination: maskPhone(phoneE164) },
+  });
 });
 
 router.get("/onboarding/images", async (_req: Request, res: Response) => {

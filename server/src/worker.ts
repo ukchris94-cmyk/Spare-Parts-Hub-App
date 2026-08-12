@@ -12,6 +12,7 @@ import { cleanupExpiredSessions, expireAbandonedCheckouts } from "./services/pay
 import { processDuePayouts } from "./services/payments/payouts";
 import { processDueRefunds } from "./services/payments/refunds";
 import { processPendingAccountDeletions } from "./services/accountDeletion";
+import { cleanupExpiredAuthChallenges } from "./services/authChallenges";
 
 let stopping = false;
 
@@ -36,6 +37,7 @@ async function run(): Promise<void> {
           cleanupExpiredSessions(),
           recoverStaleOutboxLocks(),
           processPendingAccountDeletions(),
+          cleanupExpiredAuthChallenges(),
         ]);
         maintenanceCounter = 0;
       }

@@ -54,7 +54,7 @@ async function hasActiveObligations(client: DbClient, userId: string): Promise<b
 
 async function anonymizeAccount(
   client: DbClient,
-  user: { id: string; email: string }
+  user: { id: string; email: string | null }
 ): Promise<void> {
   await client.query("DELETE FROM vehicles WHERE user_id = $1", [user.id]);
   await client.query("DELETE FROM push_tokens WHERE user_id = $1", [user.id]);
@@ -62,8 +62,17 @@ async function anonymizeAccount(
   await client.query("DELETE FROM auth_sessions WHERE user_id = $1", [user.id]);
   await client.query("DELETE FROM vendor_pickup_locations WHERE vendor_id = $1", [user.id]);
   await client.query("DELETE FROM vendor_payout_accounts WHERE vendor_id = $1", [user.id]);
-  await client.query("DELETE FROM verification_codes WHERE LOWER(email) = LOWER($1)", [user.email]);
-  await client.query("DELETE FROM password_reset_tokens WHERE LOWER(email) = LOWER($1)", [user.email]);
+  if (user.email) {
+    await client.query("DELETE FROM verification_codes WHERE LOWER(email) = LOWER($1)", [user.email]);
+    await client.query("DELETE FROM password_reset_tokens WHERE LOWER(email) = LOWER($1)", [user.email]);
+  }
+  await client.query("DELETE FROM auth_challenges WHERE user_id = $1", [user.id]);
+  await client.query(
+    `UPDATE payment_receipt_deliveries
+     SET provider_message_id = NULL, last_error = NULL, updated_at = NOW()
+     WHERE user_id = $1`,
+    [user.id]
+  );
   await client.query("UPDATE parts SET user_id = NULL, stock_qty = 0 WHERE user_id = $1", [user.id]);
   await client.query("UPDATE media_objects SET owner_id = NULL WHERE owner_id = $1", [user.id]);
   await client.query(
@@ -71,6 +80,10 @@ async function anonymizeAccount(
      SET first_name = NULL,
          last_name = NULL,
          phone = NULL,
+         phone_e164 = NULL,
+         phone_verified_at = NULL,
+         whatsapp_security_consent_at = NULL,
+         whatsapp_transaction_consent_at = NULL,
          email = $2,
          password_hash = NULL,
          verified = FALSE,
@@ -96,7 +109,7 @@ export async function requestAccountDeletion(userId: string): Promise<DeletionRe
     try {
       const result = await client.query<{
         id: string;
-        email: string;
+        email: string | null;
         deleted_at: string | null;
         deletion_requested_at: string | null;
       }>(

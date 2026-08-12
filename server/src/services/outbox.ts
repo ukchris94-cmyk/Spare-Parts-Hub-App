@@ -11,6 +11,7 @@ import { processDuePayouts } from "./payments/payouts";
 import { processRefund } from "./payments/refunds";
 import { processMonnifyWebhookEvent } from "../routes/payments";
 import { ProviderWebhook } from "./payments";
+import { processPaymentReceipt } from "./paymentReceipts";
 
 type OutboxRow = {
   id: string;
@@ -49,6 +50,13 @@ async function handleEvent(event: OutboxRow): Promise<void> {
   if (event.event_type === "payment.refund_requested") {
     const refundId = typeof event.payload.refundId === "string" ? event.payload.refundId : "";
     if (refundId) await processRefund(refundId);
+    return;
+  }
+  if (event.event_type === "payment.receipt_requested") {
+    const paymentTransactionId = typeof event.payload.paymentTransactionId === "string"
+      ? event.payload.paymentTransactionId
+      : "";
+    if (paymentTransactionId) await processPaymentReceipt(paymentTransactionId);
     return;
   }
   if (event.event_type === "payout.hold_created") {

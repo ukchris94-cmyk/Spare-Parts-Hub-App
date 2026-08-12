@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
   first_name TEXT,
   last_name  TEXT,
   phone      TEXT,
-  email      TEXT NOT NULL UNIQUE,
+  email      TEXT,
   password_hash TEXT,
   role       TEXT NOT NULL,
   verified   BOOLEAN NOT NULL DEFAULT FALSE,
@@ -17,9 +17,13 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_e164 TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS whatsapp_security_consent_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS whatsapp_transaction_consent_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_email_sent_at TIMESTAMPTZ;
 
-CREATE INDEX IF NOT EXISTS idx_users_email ON users (LOWER(email));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users (LOWER(email)) WHERE email IS NOT NULL;
 
 -- Vehicles saved in "My Garage"
 CREATE TABLE IF NOT EXISTS vehicles (

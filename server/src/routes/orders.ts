@@ -1999,12 +1999,40 @@ router.get("/:orderId", requireAuthenticated, async (req: Request, res: Response
   if (!isPrivileged && !isCustomer && !isVendor && !isDispatcher) {
     return res.status(403).json({ ok: false, message: "Not authorized to view this order" });
   }
+  let paymentReceipt: Record<string, unknown> | undefined;
+  if (isCustomer || isPrivileged) {
+    const payment = (await query<{
+      reference: string; subtotal_kobo: number | null; platform_fee_kobo: number | null;
+      tax_kobo: number | null; total_kobo: number | null; amount_kobo: number;
+      currency: string; method: string | null; paid_at: string | null;
+    }>(
+      `SELECT reference, subtotal_kobo, platform_fee_kobo, tax_kobo, total_kobo,
+              amount_kobo, currency, method, paid_at
+       FROM payment_transactions
+       WHERE order_id = $1 AND status = 'paid'
+       ORDER BY paid_at DESC NULLS LAST LIMIT 1`,
+      [order.id]
+    )).rows[0];
+    if (payment) {
+      paymentReceipt = {
+        paymentReference: payment.reference,
+        subtotalKobo: payment.subtotal_kobo ?? payment.amount_kobo,
+        platformFeeKobo: payment.platform_fee_kobo ?? 0,
+        taxKobo: payment.tax_kobo ?? 0,
+        totalKobo: payment.total_kobo ?? payment.amount_kobo,
+        currency: payment.currency,
+        method: payment.method,
+        paidAt: payment.paid_at,
+      };
+    }
+  }
   return res.json({
     id: order.id,
     userId: order.user_id,
     status: order.status,
     items: order.items ?? [],
     etaMinutes: order.status === "in_transit" ? 25 : undefined,
+    paymentReceipt,
   });
 });
 
