@@ -17,10 +17,6 @@ export function normalizeNigerianPhone(value: string): string {
   return parsed.number;
 }
 
-export function termiiDestination(phoneE164: string): string {
-  return phoneE164.replace(/^\+/, "");
-}
-
 export function maskPhone(phoneE164: string): string {
   if (phoneE164.length < 8) return "***";
   return `${phoneE164.slice(0, 4)} *** *** ${phoneE164.slice(-3)}`;

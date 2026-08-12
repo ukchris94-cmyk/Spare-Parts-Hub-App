@@ -115,7 +115,7 @@ async function deliver(
     const elapsedSeconds = challenge.last_sent_at
       ? (Date.now() - new Date(challenge.last_sent_at).getTime()) / 1000
       : Number.POSITIVE_INFINITY;
-    const requiredDelay = channel === "sms" && challenge.last_channel === "whatsapp" ? 30 : 60;
+    const requiredDelay = 60;
     if (!options.bypassChannelCooldown && elapsedSeconds < requiredDelay) {
       throw new ChallengeError(
         429,
@@ -211,27 +211,15 @@ export async function createChallenge(input: {
     [id, input.userId, input.purpose, input.phoneE164, destinationHmac, ipHmac, codeHash(id, generateCode()), JSON.stringify(input.metadata || {})]
   );
 
-  let deliveredChannel: MessageChannel = "whatsapp";
+  const deliveredChannel: MessageChannel = "sms";
   if (input.send !== false) {
-    try {
-      await deliver(id, "whatsapp", input.req, { expectedUserId: input.userId || undefined });
-    } catch (whatsappError) {
-      try {
-        await deliver(id, "sms", input.req, {
-          bypassChannelCooldown: true,
-          expectedUserId: input.userId || undefined,
-        });
-        deliveredChannel = "sms";
-      } catch {
-        throw whatsappError;
-      }
-    }
+    await deliver(id, "sms", input.req, { expectedUserId: input.userId || undefined });
   }
   return {
     challengeId: id,
     channel: deliveredChannel,
     expiresIn: 300,
-    smsAvailableIn: deliveredChannel === "whatsapp" ? 30 : 60,
+    smsAvailableIn: 60,
   };
 }
 
@@ -242,7 +230,7 @@ export async function resendChallenge(
   expectedUserId?: string
 ): Promise<{ challengeId: string; channel: MessageChannel; expiresIn: number; smsAvailableIn: number }> {
   await deliver(challengeId, channel, req, { expectedUserId });
-  return { challengeId, channel, expiresIn: 300, smsAvailableIn: channel === "whatsapp" ? 30 : 60 };
+  return { challengeId, channel, expiresIn: 300, smsAvailableIn: 60 };
 }
 
 export async function verifyChallenge(input: {
@@ -289,7 +277,9 @@ export async function verifyChallenge(input: {
         `UPDATE users
          SET phone = $2, phone_e164 = $2, phone_verified_at = NOW(), verified = TRUE,
              whatsapp_security_consent_at = CASE
-               WHEN COALESCE(($3::jsonb->>'whatsappSecurityConsent')::boolean, FALSE) THEN COALESCE(whatsapp_security_consent_at, NOW())
+               WHEN COALESCE(($3::jsonb->>'smsSecurityConsent')::boolean, FALSE)
+                 OR COALESCE(($3::jsonb->>'whatsappSecurityConsent')::boolean, FALSE)
+               THEN COALESCE(whatsapp_security_consent_at, NOW())
                ELSE whatsapp_security_consent_at
              END,
              whatsapp_transaction_consent_at = CASE

@@ -28,14 +28,11 @@ const schema = z
     ALLOW_LEGACY_AUTH_TOKENS: booleanString.optional(),
     ALLOW_LEGACY_PUBLIC_EMAIL_LOGIN: booleanString.default(true),
     PHONE_AUTH_ENABLED: booleanString.default(false),
-    MESSAGING_PROVIDER: z.enum(["disabled", "termii"]).default("disabled"),
-    TERMII_BASE_URL: z.string().url().optional(),
-    TERMII_API_KEY: z.string().trim().optional(),
-    TERMII_SECRET_KEY: z.string().min(16).optional(),
-    TERMII_SENDER_ID: z.string().trim().min(3).max(11).optional(),
-    TERMII_WHATSAPP_DEVICE_ID: z.string().trim().optional(),
-    TERMII_AUTH_TEMPLATE_ID: z.string().trim().optional(),
-    TERMII_PAYMENT_RECEIPT_TEMPLATE_ID: z.string().trim().optional(),
+    MESSAGING_PROVIDER: z.enum(["disabled", "aws_sms"]).default("disabled"),
+    AWS_SMS_REGION: z.string().trim().optional(),
+    AWS_SMS_ORIGINATION_IDENTITY: z.string().trim().optional(),
+    AWS_SMS_CONFIGURATION_SET: z.string().trim().optional(),
+    AWS_SMS_PROTECT_CONFIGURATION_ID: z.string().trim().optional(),
     AUTH_CHALLENGE_HMAC_SECRET: z.string().min(32).optional(),
     APP_DEEP_LINK_SCHEME: z.string().regex(/^[a-z][a-z0-9+.-]*$/i).default("sparepartshubmobileclean"),
     AWS_REGION: z.string().trim().optional(),
@@ -145,7 +142,6 @@ const schema = z
             ["MONNIFY_RELAY_EMAIL_APPROVED", value.MONNIFY_RELAY_EMAIL_APPROVED],
             ["PAYMENT_RELAY_EMAIL_DOMAIN", value.PAYMENT_RELAY_EMAIL_DOMAIN],
             ["PAYMENT_RELAY_EMAIL_SECRET", value.PAYMENT_RELAY_EMAIL_SECRET],
-            ["TERMII_PAYMENT_RECEIPT_TEMPLATE_ID", value.TERMII_PAYMENT_RECEIPT_TEMPLATE_ID],
           ];
           for (const [name, configured] of relayRequired) {
             if (!configured) {
@@ -160,13 +156,9 @@ const schema = z
       }
       if (value.PHONE_AUTH_ENABLED) {
         const messagingRequired: Array<[string, unknown]> = [
-          ["MESSAGING_PROVIDER", value.MESSAGING_PROVIDER === "termii"],
-          ["TERMII_BASE_URL", value.TERMII_BASE_URL],
-          ["TERMII_API_KEY", value.TERMII_API_KEY],
-          ["TERMII_SECRET_KEY", value.TERMII_SECRET_KEY],
-          ["TERMII_SENDER_ID", value.TERMII_SENDER_ID],
-          ["TERMII_WHATSAPP_DEVICE_ID", value.TERMII_WHATSAPP_DEVICE_ID],
-          ["TERMII_AUTH_TEMPLATE_ID", value.TERMII_AUTH_TEMPLATE_ID],
+          ["MESSAGING_PROVIDER", value.MESSAGING_PROVIDER === "aws_sms"],
+          ["AWS_SMS_REGION", value.AWS_SMS_REGION || value.AWS_REGION],
+          ["AWS_SMS_ORIGINATION_IDENTITY", value.AWS_SMS_ORIGINATION_IDENTITY],
           ["AUTH_CHALLENGE_HMAC_SECRET", value.AUTH_CHALLENGE_HMAC_SECRET],
         ];
         for (const [name, configured] of messagingRequired) {

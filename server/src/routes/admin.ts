@@ -132,15 +132,16 @@ router.post("/vendors", async (req: Request, res: Response) => {
       message: "Phone authentication must be configured before creating a phone-based vendor account.",
     });
   }
-  const { phone, password, whatsappSecurityConsent } = req.body as {
+  const { phone, password, smsSecurityConsent, whatsappSecurityConsent } = req.body as {
     phone?: string;
     password?: string;
+    smsSecurityConsent?: boolean;
     whatsappSecurityConsent?: boolean;
   };
-  if (whatsappSecurityConsent !== true) {
+  if (smsSecurityConsent !== true && whatsappSecurityConsent !== true) {
     return res.status(400).json({
       ok: false,
-      message: "Confirm that the vendor agreed to receive WhatsApp security codes.",
+      message: "Confirm that the vendor agreed to receive SMS security codes.",
     });
   }
 
@@ -187,7 +188,7 @@ router.post("/vendors", async (req: Request, res: Response) => {
       purpose: "signup",
       phoneE164,
       req,
-      metadata: { createdByStaff: true, whatsappSecurityConsent: true },
+      metadata: { createdByStaff: true, smsSecurityConsent: true },
     });
   } catch (error) {
     req.log.warn({ err: error, vendorUserId: id }, "Staff-created vendor OTP delivery failed");

@@ -19,7 +19,6 @@ import notificationsRouter from "./routes/notifications";
 import paymentsRouter from "./routes/payments";
 import locationsRouter from "./routes/locations";
 import mediaRouter from "./routes/media";
-import messagingRouter from "./routes/messaging";
 
 export const app = express();
 
@@ -86,10 +85,7 @@ app.use(
     limit: env.JSON_BODY_LIMIT,
     verify: (req, _res, buf) => {
       const originalUrl = (req as Request).originalUrl || req.url || "";
-      if (
-        originalUrl.includes("/payments/webhook/monnify") ||
-        originalUrl.includes("/messaging/webhook/termii")
-      ) {
+      if (originalUrl.includes("/payments/webhook/monnify")) {
         (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
       }
     },
@@ -151,7 +147,6 @@ app.use("/api/notifications", notificationsRouter);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/locations", locationsRouter);
 app.use("/api/media", mediaRouter);
-app.use("/api/messaging", messagingRouter);
 
 app.use((req: Request, res: Response) => {
   req.log.warn(

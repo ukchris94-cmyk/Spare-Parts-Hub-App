@@ -1,5 +1,6 @@
 import { messagingProvider } from "./messaging";
 import { withClient, query } from "../db";
+import { env } from "../config/env";
 
 type ReceiptRow = {
   payment_id: string;
@@ -20,6 +21,9 @@ function naira(kobo: number): string {
 }
 
 export async function processPaymentReceipt(paymentTransactionId: string): Promise<void> {
+  // SMS is reserved for security codes. The verified payment receipt remains
+  // permanently available in Order Details without exposing payment data by SMS.
+  if (env.MESSAGING_PROVIDER === "aws_sms") return;
   const claimed = await withClient(async (client) => {
     await client.query("BEGIN");
     try {

@@ -118,7 +118,8 @@ const signupSchema = z.object({
   firstName: z.string().trim().max(80).optional(),
   lastName: z.string().trim().max(80).optional(),
   fullName: z.string().trim().max(160).optional(),
-  whatsappSecurityConsent: z.literal(true),
+  smsSecurityConsent: z.boolean().optional(),
+  whatsappSecurityConsent: z.boolean().optional(),
   whatsappTransactionConsent: z.boolean().default(false),
 }).passthrough();
 
@@ -126,6 +127,10 @@ router.post("/signup", messageLimiter, async (req: Request, res: Response) => {
   if (!ensurePhoneAuth(res)) return;
   const body = parseBody(signupSchema, req, res);
   if (!body) return;
+  if (body.smsSecurityConsent !== true && body.whatsappSecurityConsent !== true) {
+    res.status(400).json({ ok: false, message: "Consent to receive SMS security codes is required." });
+    return;
+  }
 
   let phoneE164: string;
   try {
@@ -163,7 +168,7 @@ router.post("/signup", messageLimiter, async (req: Request, res: Response) => {
           purpose: "signup",
           phoneE164,
           req,
-          metadata: { whatsappSecurityConsent: true, whatsappTransactionConsent: body.whatsappTransactionConsent },
+          metadata: { smsSecurityConsent: true },
         });
         res.status(409).json({
           ok: false,
@@ -188,12 +193,12 @@ router.post("/signup", messageLimiter, async (req: Request, res: Response) => {
       purpose: "signup",
       phoneE164,
       req,
-      metadata: { whatsappSecurityConsent: true, whatsappTransactionConsent: body.whatsappTransactionConsent },
+      metadata: { smsSecurityConsent: true },
     });
     req.log.info({ userId, role: body.role }, "Phone-first user account created");
     res.status(201).json({
       ok: true,
-      message: "Account created. Verification code sent by WhatsApp.",
+      message: "Account created. Verification code sent by SMS.",
       role: body.role,
       phone: phoneE164,
       maskedPhone: maskPhone(phoneE164),
@@ -229,7 +234,7 @@ router.post("/verify-phone", loginLimiter, async (req: Request, res: Response) =
 router.post("/resend-code", messageLimiter, async (req: Request, res: Response) => {
   const challengeBody = z.object({
     challengeId: z.string().min(10).max(100),
-    channel: z.enum(["whatsapp", "sms"]).default("whatsapp"),
+    channel: z.literal("sms").default("sms"),
   }).safeParse(req.body);
   if (challengeBody.success) {
     try {
@@ -240,7 +245,7 @@ router.post("/resend-code", messageLimiter, async (req: Request, res: Response) 
         req,
         requestingUser?.id
       );
-      res.json({ ok: true, message: `Verification code sent by ${challenge.channel === "sms" ? "SMS" : "WhatsApp"}.`, ...challenge });
+      res.json({ ok: true, message: "Verification code sent by SMS.", ...challenge });
     } catch (error) {
       if (challengeFailure(error, res)) return;
       res.status(503).json({ ok: false, code: "OTP_DELIVERY_FAILED", message: "The verification code could not be sent. Please try again shortly." });
@@ -401,7 +406,7 @@ router.post("/forgot-password", messageLimiter, async (req: Request, res: Respon
   try {
     phoneE164 = normalizeNigerianPhone(supplied);
   } catch {
-    res.json({ ok: true, message: genericMessage, channel: "whatsapp", smsAvailableIn: 30 });
+    res.json({ ok: true, message: genericMessage, channel: "sms", smsAvailableIn: 60 });
     return;
   }
   const user = (await query<{ id: string }>(
@@ -501,7 +506,7 @@ router.post("/reset-password", loginLimiter, async (req: Request, res: Response)
 
 router.post("/phone-change/request", requireAuthenticated, messageLimiter, async (req: Request, res: Response) => {
   if (!ensurePhoneAuth(res) || !req.user) return;
-  const body = parseBody(z.object({ phone: z.string().trim().min(7).max(30), currentPassword: z.string().min(1).max(128), whatsappTransactionConsent: z.boolean().default(false) }), req, res);
+  const body = parseBody(z.object({ phone: z.string().trim().min(7).max(30), currentPassword: z.string().min(1).max(128) }), req, res);
   if (!body) return;
   let phoneE164: string;
   try {
@@ -530,12 +535,11 @@ router.post("/phone-change/request", requireAuthenticated, messageLimiter, async
       phoneE164,
       req,
       metadata: {
-        whatsappSecurityConsent: true,
-        whatsappTransactionConsent: body.whatsappTransactionConsent,
+        smsSecurityConsent: true,
         updateWhatsappTransactionConsent: true,
       },
     });
-    res.json({ ok: true, message: "Verification code sent by WhatsApp.", maskedPhone: maskPhone(phoneE164), ...challenge });
+    res.json({ ok: true, message: "Verification code sent by SMS.", maskedPhone: maskPhone(phoneE164), ...challenge });
   } catch (error) {
     if (challengeFailure(error, res)) return;
     res.status(503).json({ ok: false, code: "OTP_DELIVERY_FAILED", message: "The verification code could not be sent." });

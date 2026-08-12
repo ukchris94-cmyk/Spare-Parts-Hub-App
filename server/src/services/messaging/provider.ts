@@ -1,4 +1,4 @@
-export type MessageChannel = "whatsapp" | "sms";
+export type MessageChannel = "sms";
 
 export type MessageSendResult = {
   provider: string;
