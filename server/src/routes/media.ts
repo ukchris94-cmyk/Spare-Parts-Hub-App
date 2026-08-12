@@ -19,7 +19,13 @@ function isPrivileged(req: Request): boolean {
 
 function publicApiBase(req: Request): string {
   const configured = process.env.PUBLIC_API_URL?.trim().replace(/\/+$/, "");
-  if (configured) return configured;
+  if (configured) {
+    const url = new URL(configured);
+    const pathname = url.pathname.replace(/\/+$/, "");
+    return pathname && pathname !== "/"
+      ? `${url.origin}${pathname}`
+      : `${url.origin}/api`;
+  }
   return `${req.protocol}://${req.get("host")}/api`;
 }
 
