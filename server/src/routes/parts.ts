@@ -217,7 +217,7 @@ async function loadBargainOffer(offerId: string) {
        p.name AS part_name,
        p.price_ngn AS current_price_ngn,
        COALESCE(NULLIF(b.first_name, ''), split_part(b.email, '@', 1)) AS buyer_name,
-       COALESCE(NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name
+       COALESCE(NULLIF(v.business_name, ''), NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name
      FROM bargain_offers bo
      JOIN parts p ON p.id = bo.part_id
      LEFT JOIN users b ON b.id = bo.buyer_user_id
@@ -250,7 +250,7 @@ async function loadBargainMessages(offerId: string) {
        bom.id,
        bom.bargain_offer_id,
        bom.sender_user_id,
-       COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS sender_name,
+       COALESCE(NULLIF(u.business_name, ''), NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS sender_name,
        bom.message,
        bom.created_at
      FROM bargain_offer_messages bom
@@ -295,7 +295,7 @@ router.get("/search", async (req: Request, res: Response) => {
       p.stock_qty,
       p.quality,
       p.role,
-      COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name
+      COALESCE(NULLIF(u.business_name, ''), NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name
      FROM parts p
      LEFT JOIN users u ON u.id = p.user_id
      WHERE 1=1`;
@@ -363,7 +363,7 @@ router.get("/search", async (req: Request, res: Response) => {
     const legacySql = sql
       .replace("p.user_id,", "")
       .replace("p.quality,", "")
-      .replace("COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name", "NULL::text AS vendor_name")
+      .replace("COALESCE(NULLIF(u.business_name, ''), NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name", "NULL::text AS vendor_name")
       .replace("p.price_ngn, p.stock_qty,", "")
       .replace("LEFT JOIN users u ON u.id = p.user_id", "")
       .replace(/ AND p\.user_id = \$\d+/, "")
@@ -1406,7 +1406,7 @@ router.get("/requests/:requestId/offers", requireAuthenticated, async (req: Requ
        q.countered_by,
        q.created_at,
        q.updated_at,
-       COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name,
+       COALESCE(NULLIF(u.business_name, ''), NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name,
        p.name AS part_name,
        p.stock_qty,
        CASE
@@ -1517,7 +1517,7 @@ router.post("/bargain-offers/:offerId/messages", requireAuthenticated, async (re
        id,
        bargain_offer_id,
        sender_user_id,
-       (SELECT COALESCE(NULLIF(first_name, ''), split_part(email, '@', 1)) FROM users WHERE users.id = sender_user_id) AS sender_name,
+       (SELECT COALESCE(NULLIF(business_name, ''), NULLIF(first_name, ''), split_part(email, '@', 1)) FROM users WHERE users.id = sender_user_id) AS sender_name,
        message,
        created_at`,
     [messageId, offerId, userId, message],
@@ -1636,7 +1636,7 @@ router.patch("/bargain-offers/:offerId", requireRoles("vendor", "admin", "staff"
        (SELECT name FROM parts WHERE parts.id = bargain_offers.part_id) AS part_name,
        (SELECT price_ngn FROM parts WHERE parts.id = bargain_offers.part_id) AS current_price_ngn,
        (SELECT COALESCE(NULLIF(first_name, ''), split_part(email, '@', 1)) FROM users WHERE users.id = bargain_offers.buyer_user_id) AS buyer_name,
-       (SELECT COALESCE(NULLIF(first_name, ''), split_part(email, '@', 1)) FROM users WHERE users.id = bargain_offers.vendor_user_id) AS vendor_name`,
+       (SELECT COALESCE(NULLIF(business_name, ''), NULLIF(first_name, ''), split_part(email, '@', 1)) FROM users WHERE users.id = bargain_offers.vendor_user_id) AS vendor_name`,
     [nextStatus, normalizedReply || null, offerId],
   );
   const updated = rows[0];
@@ -1703,7 +1703,7 @@ router.get("/:partId", async (req: Request, res: Response) => {
            ELSE p.image_url
          END AS image_url,
          p.user_id,
-         COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name,
+         COALESCE(NULLIF(u.business_name, ''), NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name,
          p.price_ngn,
          p.stock_qty,
          p.quality,

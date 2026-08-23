@@ -71,6 +71,11 @@ function normalizeName(value?: string): string | null {
   return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
 }
 
+function normalizeProfileText(value?: string): string | null {
+  const trimmed = value?.trim().replace(/\s+/g, " ");
+  return trimmed || null;
+}
+
 function splitLegacyName(fullName?: string): { firstName: string | null; lastName: string | null } {
   const normalized = fullName?.trim().replace(/\s+/g, " ");
   if (!normalized) return { firstName: null, lastName: null };
@@ -112,7 +117,8 @@ function ensurePhoneAuth(res: Response): boolean {
 
 const signupSchema = z.object({
   role: z.enum(PUBLIC_ROLES),
-  phone: z.string().trim().min(7).max(30),
+  authMethod: z.enum(["email", "phone"]).optional(),
+  phone: z.string().trim().min(7).max(30).optional(),
   email: emailSchema.optional(),
   password: passwordSchema,
   firstName: z.string().trim().max(80).optional(),
@@ -121,12 +127,121 @@ const signupSchema = z.object({
   smsSecurityConsent: z.boolean().optional(),
   whatsappSecurityConsent: z.boolean().optional(),
   whatsappTransactionConsent: z.boolean().default(false),
-}).passthrough();
+  state: z.string().trim().max(80).optional(),
+  city: z.string().trim().max(120).optional(),
+  mechanicDetails: z.object({
+    workshopName: z.string().trim().max(160).optional(),
+    specialization: z.string().trim().max(240).optional(),
+    state: z.string().trim().max(80).optional(),
+    city: z.string().trim().max(120).optional(),
+  }).optional(),
+  vendorDetails: z.object({
+    shopName: z.string().trim().max(160).optional(),
+    businessType: z.string().trim().max(160).optional(),
+    state: z.string().trim().max(80).optional(),
+    city: z.string().trim().max(120).optional(),
+  }).optional(),
+}).passthrough().refine((value) => value.authMethod === "email" ? !!value.email : value.authMethod === "phone" ? !!value.phone : !!value.email || !!value.phone, {
+  message: "Email or phone number is required",
+});
 
 router.post("/signup", messageLimiter, async (req: Request, res: Response) => {
-  if (!ensurePhoneAuth(res)) return;
   const body = parseBody(signupSchema, req, res);
   if (!body) return;
+  const useEmail = body.authMethod === "email" || (!body.phone && !!body.email);
+  const legacyName = splitLegacyName(body.fullName);
+  const firstName = normalizeName(body.firstName) ?? legacyName.firstName;
+  const lastName = normalizeName(body.lastName) ?? legacyName.lastName;
+  const businessName = body.role === "vendor"
+    ? normalizeProfileText(body.vendorDetails?.shopName)
+    : body.role === "mechanic"
+      ? normalizeProfileText(body.mechanicDetails?.workshopName)
+      : null;
+  const businessType = body.role === "vendor"
+    ? normalizeProfileText(body.vendorDetails?.businessType)
+    : null;
+  const specialization = body.role === "mechanic"
+    ? normalizeProfileText(body.mechanicDetails?.specialization)
+    : null;
+  const state = normalizeProfileText(
+    body.vendorDetails?.state || body.mechanicDetails?.state || body.state,
+  );
+  const city = normalizeProfileText(
+    body.vendorDetails?.city || body.mechanicDetails?.city || body.city,
+  );
+  const userId = identifier("usr");
+  const passwordHash = await hashPassword(body.password);
+
+  if (useEmail) {
+    if (!body.email) {
+      res.status(400).json({ ok: false, message: "A valid email address is required." });
+      return;
+    }
+    try {
+      await query(
+        `INSERT INTO users
+           (id, first_name, last_name, phone, phone_e164, email, password_hash, role, verified,
+            business_name, business_type, specialization, state, city)
+         VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, FALSE, $7, $8, $9, $10, $11)`,
+        [
+          userId,
+          firstName,
+          lastName,
+          body.email,
+          passwordHash,
+          body.role,
+          businessName,
+          businessType,
+          specialization,
+          state,
+          city,
+        ]
+      );
+    } catch (error) {
+      if ((error as { code?: string }).code !== "23505") throw error;
+      const existing = await query<{ verified: boolean }>(
+        "SELECT verified FROM users WHERE LOWER(email) = $1 AND deleted_at IS NULL LIMIT 1",
+        [body.email]
+      );
+      res.status(409).json({
+        ok: false,
+        code: existing.rows[0]?.verified ? "ACCOUNT_EXISTS" : "ACCOUNT_UNVERIFIED",
+        message: existing.rows[0]?.verified
+          ? "Account already exists. Please log in."
+          : "Account already exists but still needs email verification.",
+        email: body.email,
+        verificationMethod: "email",
+      });
+      return;
+    }
+
+    const code = await issueLegacyEmailCode(body.email, false);
+    if (!code) throw new Error("Could not create email verification code");
+    try {
+      await sendVerificationEmail(body.email, code);
+    } catch (error) {
+      req.log.error({ err: error, userId }, "Signup verification email delivery failed");
+      res.status(503).json({
+        ok: false,
+        code: "EMAIL_DELIVERY_FAILED",
+        message: "Your account was created, but the verification email could not be sent. Try resend shortly.",
+        email: body.email,
+        verificationMethod: "email",
+      });
+      return;
+    }
+    req.log.info({ userId, role: body.role }, "Email signup account created");
+    res.status(201).json({
+      ok: true,
+      message: "Account created. Verification code sent by email.",
+      role: body.role,
+      email: body.email,
+      verificationMethod: "email",
+    });
+    return;
+  }
+
+  if (!ensurePhoneAuth(res)) return;
   if (body.smsSecurityConsent !== true && body.whatsappSecurityConsent !== true) {
     res.status(400).json({ ok: false, message: "Consent to receive SMS security codes is required." });
     return;
@@ -134,26 +249,35 @@ router.post("/signup", messageLimiter, async (req: Request, res: Response) => {
 
   let phoneE164: string;
   try {
-    phoneE164 = normalizeNigerianPhone(body.phone);
+    phoneE164 = normalizeNigerianPhone(body.phone || "");
   } catch (error) {
     if (challengeFailure(error, res)) return;
     throw error;
   }
 
-  const legacyName = splitLegacyName(body.fullName);
-  const firstName = normalizeName(body.firstName) ?? legacyName.firstName;
-  const lastName = normalizeName(body.lastName) ?? legacyName.lastName;
-  const userId = identifier("usr");
-  const passwordHash = await hashPassword(body.password);
-
   try {
     await query(
       `INSERT INTO users
          (id, first_name, last_name, phone, phone_e164, email, password_hash, role, verified,
-          whatsapp_security_consent_at, whatsapp_transaction_consent_at)
+          whatsapp_security_consent_at, whatsapp_transaction_consent_at,
+          business_name, business_type, specialization, state, city)
        VALUES ($1, $2, $3, $4, $4, $5, $6, $7, FALSE, NOW(),
-               CASE WHEN $8 THEN NOW() ELSE NULL END)`,
-      [userId, firstName, lastName, phoneE164, body.email || null, passwordHash, body.role, body.whatsappTransactionConsent]
+               CASE WHEN $8 THEN NOW() ELSE NULL END, $9, $10, $11, $12, $13)`,
+      [
+        userId,
+        firstName,
+        lastName,
+        phoneE164,
+        body.email || null,
+        passwordHash,
+        body.role,
+        body.whatsappTransactionConsent,
+        businessName,
+        businessType,
+        specialization,
+        state,
+        city,
+      ]
     );
   } catch (error) {
     if ((error as { code?: string }).code !== "23505") throw error;
@@ -295,9 +419,10 @@ router.post("/login", loginLimiter, async (req: Request, res: Response) => {
 
   const result = await query<{
     id: string; first_name: string | null; last_name: string | null; email: string | null;
-    phone_e164: string | null; role: string; verified: boolean; phone_verified_at: Date | null; password_hash: string | null;
+    phone_e164: string | null; business_name: string | null; role: string; verified: boolean;
+    phone_verified_at: Date | null; password_hash: string | null;
   }>(
-    `SELECT id, first_name, last_name, email, phone_e164, role, verified, phone_verified_at, password_hash
+    `SELECT id, first_name, last_name, email, phone_e164, business_name, role, verified, phone_verified_at, password_hash
      FROM users
      WHERE ${isEmail ? "LOWER(email) = $1" : "phone_e164 = $1"}
        AND deleted_at IS NULL AND deletion_requested_at IS NULL
@@ -319,6 +444,15 @@ router.post("/login", loginLimiter, async (req: Request, res: Response) => {
     return;
   }
   if (!user.verified || (!isEmail && !user.phone_verified_at)) {
+    if (isEmail && user.email) {
+      res.status(403).json({
+        ok: false,
+        code: "EMAIL_VERIFICATION_REQUIRED",
+        message: "Please verify your email address before logging in.",
+        email: user.email,
+      });
+      return;
+    }
     if (!PRIVILEGED_ROLES.has(user.role) && user.phone_e164 && env.PHONE_AUTH_ENABLED) {
       try {
         const challenge = await createChallenge({
@@ -354,6 +488,7 @@ router.post("/login", loginLimiter, async (req: Request, res: Response) => {
     lastName: user.last_name ?? undefined,
     email: user.email ?? undefined,
     phone: user.phone_e164 ?? undefined,
+    businessName: user.business_name ?? undefined,
     phoneVerified: !!user.phone_verified_at,
     role: user.role,
     token: tokens.accessToken,

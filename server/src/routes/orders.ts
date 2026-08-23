@@ -228,7 +228,7 @@ function extractDeliveryLocation(items: unknown): {
 
 async function getVendorDisplayName(client: DbClient, vendorUserId: string): Promise<string> {
   const { rows } = await client.query<{ vendor_name: string | null }>(
-    `SELECT COALESCE(NULLIF(first_name, ''), split_part(email, '@', 1), 'Vendor') AS vendor_name
+    `SELECT COALESCE(NULLIF(business_name, ''), NULLIF(first_name, ''), split_part(email, '@', 1), 'Vendor') AS vendor_name
      FROM users
      WHERE id = $1
      LIMIT 1`,
@@ -487,7 +487,7 @@ async function createAvailableDeliveryJob(
        o.items,
        COALESCE(NULLIF(c.first_name, ''), split_part(c.email, '@', 1)) AS buyer_name,
        c.phone AS buyer_phone,
-       COALESCE(NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name,
+       COALESCE(NULLIF(v.business_name, ''), NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name,
        v.phone AS vendor_phone
      FROM orders o
      LEFT JOIN users c ON c.id = o.user_id
@@ -734,7 +734,7 @@ router.get("/user/:userId", requireAuthenticated, async (req: Request, res: Resp
       }>(
         `SELECT
            p.id AS part_id,
-           COALESCE(NULLIF(u.first_name, ''), split_part(u.email, '@', 1), 'Vendor') AS vendor_name
+           COALESCE(NULLIF(u.business_name, ''), NULLIF(u.first_name, ''), split_part(u.email, '@', 1), 'Vendor') AS vendor_name
          FROM parts p
          LEFT JOIN users u ON u.id = p.user_id
          WHERE p.id = ANY($1::text[])`,
@@ -907,7 +907,7 @@ router.get("/pending", requireAuthenticated, async (req: Request, res: Response)
        dj.failure_reason,
        o.items,
        COALESCE(NULLIF(c.first_name, ''), split_part(c.email, '@', 1)) AS buyer_name,
-       COALESCE(NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name
+       COALESCE(NULLIF(v.business_name, ''), NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name
      FROM delivery_jobs dj
      JOIN orders o ON o.id = dj.order_id
      LEFT JOIN users c ON c.id = dj.customer_id
@@ -982,7 +982,7 @@ router.get("/dispatcher/:dispatcherId/jobs", requireAuthenticated, async (req: R
        dj.failure_reason,
        o.items,
        COALESCE(NULLIF(c.first_name, ''), split_part(c.email, '@', 1)) AS buyer_name,
-       COALESCE(NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name
+       COALESCE(NULLIF(v.business_name, ''), NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name
      FROM delivery_jobs dj
      JOIN orders o ON o.id = dj.order_id
      LEFT JOIN users c ON c.id = dj.customer_id
@@ -1870,7 +1870,7 @@ router.get("/:orderId/tracking", requireAuthenticated, async (req: Request, res:
        dj.issue_note,
        dj.failure_reason,
        COALESCE(NULLIF(c.first_name, ''), split_part(c.email, '@', 1)) AS buyer_name,
-       COALESCE(NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name,
+       COALESCE(NULLIF(v.business_name, ''), NULLIF(v.first_name, ''), split_part(v.email, '@', 1)) AS vendor_name,
        TRIM(CONCAT(COALESCE(d.first_name, ''), ' ', COALESCE(d.last_name, ''))) AS dispatcher_name,
        d.phone AS dispatcher_phone
      FROM orders o

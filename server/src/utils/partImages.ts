@@ -39,6 +39,12 @@ export type PublicPartImage = {
   id: string | null;
   url: string;
   isPrimary: boolean;
+  imageKind: "inventory" | "catalog_reference";
+  sourceName: string | null;
+  sourceUrl: string | null;
+  licenseName: string | null;
+  licenseUrl: string | null;
+  attribution: string | null;
 };
 
 export async function loadPartImageGalleries(
@@ -52,14 +58,24 @@ export async function loadPartImageGalleries(
     part_id: string;
     media_id: string;
     storage_uri: string;
+    image_kind: "inventory" | "catalog_reference";
+    source_name: string | null;
+    source_url: string | null;
+    license_name: string | null;
+    license_url: string | null;
+    attribution: string | null;
   }>(
-    `SELECT pi.part_id, pi.media_id, pi.storage_uri
+    `SELECT pi.part_id, pi.media_id, pi.storage_uri, pi.image_kind, pi.source_name,
+            pi.source_url, pi.license_name, pi.license_url, pi.attribution
      FROM part_images pi
      JOIN media_objects mo ON mo.id = pi.media_id
      WHERE pi.part_id = ANY($1::text[])
        AND mo.status = 'verified'
        AND mo.deleted_at IS NULL
-     ORDER BY pi.part_id, pi.sort_order, pi.created_at`,
+     ORDER BY pi.part_id,
+              CASE WHEN pi.image_kind = 'inventory' THEN 0 ELSE 1 END,
+              pi.sort_order,
+              pi.created_at`,
     [parts.map((part) => part.id)],
   );
 
@@ -70,6 +86,12 @@ export async function loadPartImageGalleries(
       id: row.media_id,
       url: `${publicApiBaseUrl(req)}/media/${encodeURIComponent(row.media_id)}/content`,
       isPrimary: primaryByPart.get(row.part_id) === row.storage_uri,
+      imageKind: row.image_kind,
+      sourceName: row.source_name,
+      sourceUrl: row.source_url,
+      licenseName: row.license_name,
+      licenseUrl: row.license_url,
+      attribution: row.attribution,
     });
     galleries.set(row.part_id, current);
   }
@@ -81,9 +103,18 @@ export async function loadPartImageGalleries(
         id: null,
         url: publicPartImageUrl(req, part.id, part.image_url) || "",
         isPrimary: true,
+        imageKind: "inventory",
+        sourceName: null,
+        sourceUrl: null,
+        licenseName: null,
+        licenseUrl: null,
+        attribution: null,
       });
     }
-    current.sort((left, right) => Number(right.isPrimary) - Number(left.isPrimary));
+    current.sort((left, right) => {
+      const kindOrder = Number(left.imageKind === "catalog_reference") - Number(right.imageKind === "catalog_reference");
+      return kindOrder || Number(right.isPrimary) - Number(left.isPrimary);
+    });
     galleries.set(part.id, current.filter((image) => image.url));
   }
 
