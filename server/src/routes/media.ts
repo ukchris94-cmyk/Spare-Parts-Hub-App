@@ -12,6 +12,9 @@ import {
 
 const router = Router();
 const MAX_PART_IMAGES = 8;
+class ApplicabilityRequiredError extends Error {
+  constructor() { super("Choose how this product is matched before changing its photos"); }
+}
 
 function isPrivileged(req: Request): boolean {
   return ["admin", "staff"].includes(req.user?.role || "");
@@ -38,9 +41,10 @@ router.get("/:id/content", async (req: Request, res: Response) => {
   }
   const published = await query<{ found: boolean }>(
     `SELECT EXISTS(
-       SELECT 1 FROM parts WHERE id = $1 AND image_url = $2
+       SELECT 1 FROM parts WHERE id = $1 AND listing_status = 'published' AND image_url = $2
        UNION ALL
-       SELECT 1 FROM part_images WHERE part_id = $1 AND storage_uri = $2
+       SELECT 1 FROM part_images pi JOIN parts p ON p.id=pi.part_id
+       WHERE pi.part_id = $1 AND pi.storage_uri = $2 AND p.listing_status='published'
      ) AS found`,
     [partId, s3StorageUri(media)]
   );
@@ -66,9 +70,12 @@ router.post("/uploads", requireAuthenticated, async (req: Request, res: Response
     return res.status(400).json({ ok: false, message: "partId is required for a part image" });
   }
   if (partId) {
-    const owner = await query<{ user_id: string | null; image_count: string }>(
+    const owner = await query<{ user_id: string | null; image_count: string; has_applicability: boolean }>(
       `SELECT
          p.user_id,
+         (p.applicability_type IS NOT NULL OR EXISTS (
+           SELECT 1 FROM part_compatibilities pc WHERE pc.part_id = p.id
+         )) AS has_applicability,
          (
            SELECT COUNT(*) FROM part_images pi WHERE pi.part_id = p.id
          ) + CASE
@@ -88,6 +95,9 @@ router.post("/uploads", requireAuthenticated, async (req: Request, res: Response
     if (!owner.rows[0]) return res.status(404).json({ ok: false, message: "Part not found" });
     if (!isPrivileged(req) && owner.rows[0].user_id !== req.user.id) {
       return res.status(403).json({ ok: false, message: "Not authorized to update this part" });
+    }
+    if (purpose === "part_image" && !owner.rows[0].has_applicability) {
+      return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: "Choose how this product is matched before changing its photos" });
     }
     if (purpose === "part_image" && Number(owner.rows[0].image_count) >= MAX_PART_IMAGES) {
       return res.status(409).json({
@@ -140,7 +150,14 @@ router.post("/uploads/:id/complete", requireAuthenticated, async (req: Request, 
       await withClient(async (client) => {
         await client.query("BEGIN");
         try {
-          await client.query("SELECT id FROM parts WHERE id = $1 FOR UPDATE", [partId]);
+          const locked = await client.query<{ has_applicability: boolean }>(
+            `SELECT (p.applicability_type IS NOT NULL OR EXISTS (
+               SELECT 1 FROM part_compatibilities pc WHERE pc.part_id = p.id
+             )) AS has_applicability
+             FROM parts p WHERE p.id = $1 FOR UPDATE`,
+            [partId],
+          );
+          if (!locked.rows[0]?.has_applicability) throw new ApplicabilityRequiredError();
           const existing = await client.query(
             "SELECT 1 FROM part_images WHERE media_id = $1 LIMIT 1",
             [completed.id],
@@ -179,9 +196,13 @@ router.post("/uploads/:id/complete", requireAuthenticated, async (req: Request, 
              SET image_url = CASE
                WHEN image_url IS NULL OR image_url = '' THEN $1
                ELSE image_url
+             END,
+             listing_status = CASE
+               WHEN $3::boolean AND applicability_type IN ('specification','universal') THEN 'pending_review'
+               ELSE listing_status
              END
              WHERE id = $2`,
-            [storageUri, partId],
+            [storageUri, partId, req.user?.role === "vendor"],
           );
           await client.query("COMMIT");
         } catch (error) {
@@ -225,8 +246,10 @@ router.post("/uploads/:id/complete", requireAuthenticated, async (req: Request, 
     });
   } catch (error) {
     req.log.warn({ err: error, mediaId: media.id }, "Media upload completion failed");
-    return res.status(400).json({
+    const applicabilityRequired = error instanceof ApplicabilityRequiredError;
+    return res.status(applicabilityRequired ? 422 : 400).json({
       ok: false,
+      ...(applicabilityRequired ? { code: "APPLICABILITY_REQUIRED" } : {}),
       message: error instanceof Error ? error.message : "Could not verify image upload",
     });
   }
@@ -238,17 +261,23 @@ router.delete("/:id", requireAuthenticated, async (req: Request, res: Response) 
   if (!media) return res.status(404).json({ ok: false, message: "Media not found" });
   const storageUri = s3StorageUri(media);
   const linkedParts = media.purpose === "part_image"
-    ? await query<{ id: string; user_id: string | null }>(
-        `SELECT DISTINCT p.id, p.user_id
+    ? await query<{ id: string; user_id: string | null; has_applicability: boolean }>(
+        `SELECT DISTINCT p.id, p.user_id,
+           (p.applicability_type IS NOT NULL OR EXISTS (
+             SELECT 1 FROM part_compatibilities pc WHERE pc.part_id = p.id
+           )) AS has_applicability
          FROM parts p
          LEFT JOIN part_images pi ON pi.part_id = p.id
          WHERE p.image_url = $1 OR pi.media_id = $2`,
         [storageUri, media.id],
       )
-    : { rows: [] as Array<{ id: string; user_id: string | null }> };
+    : { rows: [] as Array<{ id: string; user_id: string | null; has_applicability: boolean }> };
   const ownsLinkedPart = linkedParts.rows.some((part) => part.user_id === req.user?.id);
   if (!isPrivileged(req) && media.owner_id !== req.user.id && !ownsLinkedPart) {
     return res.status(403).json({ ok: false, message: "Not authorized" });
+  }
+  if (linkedParts.rows.some((part) => !part.has_applicability)) {
+    return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: "Choose how this product is matched before changing its photos" });
   }
   await deleteMediaObject(media);
   await withClient(async (client) => {
@@ -268,6 +297,12 @@ router.delete("/:id", requireAuthenticated, async (req: Request, res: Response) 
          WHERE p.image_url = $1`,
         [storageUri],
       );
+      if (req.user?.role === "vendor" && linkedParts.rows.length) {
+        await client.query(
+          "UPDATE parts SET listing_status='pending_review' WHERE id=ANY($1::text[]) AND applicability_type IN ('specification','universal')",
+          [linkedParts.rows.map((part) => part.id)],
+        );
+      }
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");

@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc -p tsconfig.json",
+    "test:fitment": "npm run build && node --test dist/services/partFitment.test.js dist/services/partApplicability.test.js dist/services/fitmentBackfillDb.test.js dist/services/fitmentBackfill.integration.test.js",
+    "fitment:backfill": "node dist/scripts/fitment-backfill.js",
     "test": "npm run build && node --test dist/services/phoneNumbers.test.js dist/services/messaging/awsSms.test.js dist/services/payments/fees.test.js dist/services/payments/monnify.test.js",
     "start": "node dist/server.js",
     "worker": "node dist/worker.js",

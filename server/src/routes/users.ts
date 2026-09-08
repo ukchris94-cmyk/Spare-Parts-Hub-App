@@ -126,6 +126,7 @@ router.get("/:userId/home", async (req: Request, res: Response) => {
          END AS image_url,
          role
        FROM parts
+       WHERE listing_status = 'published'
        ORDER BY created_at DESC
        LIMIT 8`
     );

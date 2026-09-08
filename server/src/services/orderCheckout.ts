@@ -25,6 +25,7 @@ type AcceptedBargainRow = {
   used_order_id: string | null;
   current_price_ngn: number | null;
   part_name: string;
+  listing_status: string;
 };
 
 type PartPriceRow = {
@@ -33,6 +34,7 @@ type PartPriceRow = {
   user_id: string | null;
   price_ngn: number | null;
   stock_qty: number | null;
+  listing_status: string;
 };
 
 type QuotePriceRow = {
@@ -47,6 +49,7 @@ type QuotePriceRow = {
   part_description: string | null;
   part_name: string | null;
   stock_qty: number | null;
+  listing_status: string | null;
 };
 
 export function genCheckoutId(prefix: string): string {
@@ -156,7 +159,8 @@ export async function normalizeCheckoutItems(
            bo.accepted_price_ngn,
            bo.used_order_id,
            p.price_ngn AS current_price_ngn,
-           p.name AS part_name
+           p.name AS part_name,
+           p.listing_status
          FROM bargain_offers bo
          JOIN parts p ON p.id = bo.part_id
          WHERE bo.id = $1
@@ -176,6 +180,9 @@ export async function normalizeCheckoutItems(
       }
       if (offer.used_order_id) {
         throw new CheckoutOrderError(409, "This accepted bargain offer has already been used for an order.");
+      }
+      if (offer.listing_status !== "published") {
+        throw new CheckoutOrderError(409, "This listing is awaiting staff review and cannot be purchased yet.");
       }
       if (requestedPartId && requestedPartId !== offer.part_id) {
         throw new CheckoutOrderError(400, "Accepted bargain offer does not match this part.");
@@ -214,7 +221,8 @@ export async function normalizeCheckoutItems(
            pr.status AS request_status,
            pr.part_description,
            p.name AS part_name,
-           p.stock_qty
+           p.stock_qty,
+           p.listing_status
          FROM part_request_quotes q
          JOIN part_requests pr ON pr.id = q.request_id
          LEFT JOIN parts p ON p.id = q.part_id
@@ -235,6 +243,9 @@ export async function normalizeCheckoutItems(
       }
       if (["rejected", "closed"].includes(quote.status)) {
         throw new CheckoutOrderError(409, "This quote is no longer available.");
+      }
+      if (quote.part_id && quote.listing_status !== "published") {
+        throw new CheckoutOrderError(409, "This listing is awaiting staff review and cannot be purchased yet.");
       }
       if (typeof quote.stock_qty === "number" && quote.stock_qty >= 0 && quantity > quote.stock_qty) {
         throw new CheckoutOrderError(409, "Requested quantity is no longer available.");
@@ -261,7 +272,7 @@ export async function normalizeCheckoutItems(
     }
 
     const { rows } = await client.query<PartPriceRow>(
-      `SELECT id, name, user_id, price_ngn, stock_qty
+      `SELECT id, name, user_id, price_ngn, stock_qty, listing_status
        FROM parts
        WHERE id = $1
        LIMIT 1`,
@@ -270,6 +281,9 @@ export async function normalizeCheckoutItems(
     const part = rows[0];
     if (!part) {
       throw new CheckoutOrderError(404, "A checkout item was not found.");
+    }
+    if (part.listing_status !== "published") {
+      throw new CheckoutOrderError(409, "This listing is awaiting staff review and cannot be purchased yet.");
     }
     if (!part.price_ngn || part.price_ngn <= 0) {
       throw new CheckoutOrderError(409, "This part is not currently available for checkout.");

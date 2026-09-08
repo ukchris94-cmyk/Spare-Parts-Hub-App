@@ -1,8 +1,15 @@
 import { Router, Request, Response } from "express";
 import { randomUUID } from "crypto";
 import { query, withClient } from "../db";
-import { requireAuthenticated, requireRoles } from "../middleware/auth";
+import { authenticateRequest, requireAuthenticated, requireRoles } from "../middleware/auth";
 import { createNotification } from "../services/notifications";
+import { FITMENT_REQUIRED, FitmentRequiredError, requiresFitmentRepair, normalizeCompatibilities } from "../services/partFitment";
+import {
+  normalizeApplicabilityType,
+  normalizePartMetadata,
+  normalizeSpecifications,
+  validateApplicability,
+} from "../services/partApplicability";
 import {
   loadPartImageGalleries,
   publicPartImageUrl,
@@ -66,47 +73,6 @@ function normalizeQuality(value: unknown): string | null {
   return PART_QUALITIES.has(normalized) ? normalized : null;
 }
 
-function normalizeCompatibilities(value: unknown): {
-  items: PartCompatibility[];
-  error?: string;
-} {
-  if (value === undefined || value === null) return { items: [] };
-  if (!Array.isArray(value)) {
-    return { items: [], error: "compatibilities must be an array" };
-  }
-  if (value.length > 100) {
-    return { items: [], error: "A part can have at most 100 compatible vehicles" };
-  }
-
-  const items: PartCompatibility[] = [];
-  const seen = new Set<string>();
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object") {
-      return { items: [], error: "Each compatibility must be an object" };
-    }
-    const input = entry as Record<string, unknown>;
-    const make = typeof input.make === "string" ? input.make.trim() : "";
-    const model = typeof input.model === "string" ? input.model.trim() : "";
-    const trim = typeof input.trim === "string" && input.trim.trim()
-      ? input.trim.trim()
-      : null;
-    const year = toNullableInt(input.year);
-    if (!make || !model || !year || year < 1900 || year > 2200) {
-      return {
-        items: [],
-        error: "Each compatibility requires a valid make, model, and year",
-      };
-    }
-    if (make.length > 80 || model.length > 100 || (trim?.length || 0) > 100) {
-      return { items: [], error: "Vehicle compatibility values are too long" };
-    }
-    const key = `${make.toLowerCase()}|${model.toLowerCase()}|${year}|${(trim || "").toLowerCase()}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    items.push({ make, model, year, trim });
-  }
-  return { items };
-}
 
 async function loadPartCompatibilities(
   partIds: string[],
@@ -263,11 +229,12 @@ async function loadBargainMessages(offerId: string) {
 }
 
 router.get("/search", async (req: Request, res: Response) => {
-  const { query: q, role, category, userId, page: rawPage, pageSize: rawPageSize } = req.query as {
+  const { query: q, role, category, userId, includePending, page: rawPage, pageSize: rawPageSize } = req.query as {
     query?: string;
     role?: string;
     category?: string;
     userId?: string;
+    includePending?: string;
     page?: string;
     pageSize?: string;
   };
@@ -277,6 +244,16 @@ router.get("/search", async (req: Request, res: Response) => {
   const userIdFilter = typeof userId === "string" ? userId.trim() : null;
   const categoryFilter =
     typeof category === "string" ? category.trim().toLowerCase() : "";
+  const wantsPending = includePending === "true";
+  if (wantsPending) {
+    const user = await authenticateRequest(req);
+    const canReviewAll = !!user && ["admin", "staff"].includes(user.role);
+    const canViewOwn = !!user && user.role === "vendor" && userIdFilter === user.id;
+    if (!canReviewAll && !canViewOwn) {
+      return res.status(403).json({ ok: false, message: "You cannot view pending listings for this account" });
+    }
+    req.user = user;
+  }
   const page = queryInt(rawPage, 1, 1, 100_000);
   const pageSize = queryInt(rawPageSize, 50, 1, 100);
   const offset = (page - 1) * pageSize;
@@ -295,10 +272,17 @@ router.get("/search", async (req: Request, res: Response) => {
       p.stock_qty,
       p.quality,
       p.role,
+      p.category,
+      p.brand,
+      p.manufacturer_part_number,
+      p.applicability_type,
+      p.specifications,
+      p.listing_status,
+      p.applicability_review_note,
       COALESCE(NULLIF(u.business_name, ''), NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name
      FROM parts p
      LEFT JOIN users u ON u.id = p.user_id
-     WHERE 1=1`;
+     WHERE ${wantsPending ? "1=1" : "p.listing_status = 'published'"}`;
   const params: unknown[] = [];
   let i = 1;
   if (search) {
@@ -306,6 +290,10 @@ router.get("/search", async (req: Request, res: Response) => {
     sql += ` AND (
       p.name ILIKE $${i}
       OR p.description ILIKE $${i}
+      OR p.category ILIKE $${i}
+      OR p.brand ILIKE $${i}
+      OR p.manufacturer_part_number ILIKE $${i}
+      OR p.specifications::text ILIKE $${i}
       OR EXISTS (
         SELECT 1 FROM part_compatibilities pc
         WHERE pc.part_id = p.id
@@ -325,8 +313,8 @@ router.get("/search", async (req: Request, res: Response) => {
     i++;
   }
   if (categoryFilter && categoryFilter !== "all") {
-    params.push(`%${categoryFilter}%`);
-    sql += ` AND (p.name ILIKE $${i} OR p.description ILIKE $${i})`;
+    params.push(categoryFilter);
+    sql += ` AND lower(p.category) = $${i}`;
     i++;
   }
   params.push(pageSize + 1, offset);
@@ -342,6 +330,13 @@ router.get("/search", async (req: Request, res: Response) => {
     stock_qty: number | null;
     quality: string | null;
     role: string | null;
+    category: string | null;
+    brand: string | null;
+    manufacturer_part_number: string | null;
+    applicability_type: string | null;
+    specifications: unknown;
+    listing_status: string;
+    applicability_review_note: string | null;
     vendor_name: string | null;
   }> = [];
   try {
@@ -355,6 +350,13 @@ router.get("/search", async (req: Request, res: Response) => {
       stock_qty: number | null;
       quality: string | null;
       role: string | null;
+      category: string | null;
+      brand: string | null;
+      manufacturer_part_number: string | null;
+      applicability_type: string | null;
+      specifications: unknown;
+      listing_status: string;
+      applicability_review_note: string | null;
       vendor_name: string | null;
     }>(sql, params);
     rows = result.rows;
@@ -382,6 +384,13 @@ router.get("/search", async (req: Request, res: Response) => {
       price_ngn: null,
       stock_qty: null,
       quality: null,
+      category: null,
+      brand: null,
+      manufacturer_part_number: null,
+      applicability_type: null,
+      specifications: [],
+      listing_status: "published",
+      applicability_review_note: null,
     }));
   }
   const hasMore = rows.length > pageSize;
@@ -408,6 +417,15 @@ router.get("/search", async (req: Request, res: Response) => {
         priceNgn: row.price_ngn,
         stockQty: row.stock_qty,
         quality: row.quality,
+        category: row.category,
+        brand: row.brand,
+        manufacturerPartNumber: row.manufacturer_part_number,
+        applicabilityType: row.applicability_type,
+        specifications: Array.isArray(row.specifications) ? row.specifications : [],
+        listingStatus: row.listing_status,
+        applicabilityReviewNote: wantsPending || row.applicability_type === "universal"
+          ? row.applicability_review_note
+          : null,
         images: imageGalleries.get(row.id) || [],
         compatibilities: compatibilities.get(row.id) || [],
       };
@@ -424,7 +442,7 @@ router.get("/search", async (req: Request, res: Response) => {
 router.get("/:partId/image", async (req: Request, res: Response) => {
   const { partId } = req.params;
   const result = await query<{ image_url: string | null }>(
-    "SELECT image_url FROM parts WHERE id = $1 LIMIT 1",
+    "SELECT image_url FROM parts WHERE id = $1 AND listing_status = 'published' LIMIT 1",
     [partId],
   );
   return await sendPartImage(res, result.rows[0]?.image_url ?? null);
@@ -432,8 +450,12 @@ router.get("/:partId/image", async (req: Request, res: Response) => {
 
 router.delete("/:partId/images/primary", requireAuthenticated, async (req: Request, res: Response) => {
   const partId = String(req.params.partId);
-  const owner = await query<{ user_id: string | null }>(
-    "SELECT user_id FROM parts WHERE id = $1 LIMIT 1",
+  const owner = await query<{ user_id: string | null; has_applicability: boolean }>(
+    `SELECT p.user_id,
+       (p.applicability_type IS NOT NULL OR EXISTS (
+         SELECT 1 FROM part_compatibilities pc WHERE pc.part_id = p.id
+       )) AS has_applicability
+     FROM parts p WHERE p.id = $1 LIMIT 1`,
     [partId],
   );
   if (!owner.rows[0]) {
@@ -441,6 +463,9 @@ router.delete("/:partId/images/primary", requireAuthenticated, async (req: Reque
   }
   if (!isPrivileged(req) && owner.rows[0].user_id !== req.user?.id) {
     return res.status(403).json({ ok: false, message: "Not authorized to update this part" });
+  }
+  if (!owner.rows[0].has_applicability) {
+    return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: "Choose how this product is matched before changing its photos" });
   }
   await query(
     `UPDATE parts
@@ -454,12 +479,20 @@ router.delete("/:partId/images/primary", requireAuthenticated, async (req: Reque
      WHERE id = $1`,
     [partId],
   );
+  if (req.user?.role === "vendor") {
+    await query(
+      "UPDATE parts SET listing_status='pending_review' WHERE id=$1 AND applicability_type IN ('specification','universal')",
+      [partId],
+    );
+  }
   return res.json({ ok: true });
 });
 
 router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, res: Response) => {
   const log = req.log;
-  const { userId, name, description, imageUrl, role, priceNgn, stockQty, quality, compatibilities } = req.body as {
+  const { userId, name, description, imageUrl, role, priceNgn, stockQty, quality, compatibilities,
+    category, brand, manufacturerPartNumber, applicabilityType, specifications,
+    applicabilityReviewNote, universalConfirmed } = req.body as {
     userId?: string;
     name?: string;
     description?: string;
@@ -469,6 +502,13 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
     stockQty?: number | string;
     quality?: string;
     compatibilities?: unknown;
+    category?: unknown;
+    brand?: unknown;
+    manufacturerPartNumber?: unknown;
+    applicabilityType?: unknown;
+    specifications?: unknown;
+    applicabilityReviewNote?: unknown;
+    universalConfirmed?: boolean;
   };
 
   const normalizedName = typeof name === "string" ? name.trim() : "";
@@ -484,6 +524,11 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
   const normalizedStockQty = toNullableInt(stockQty);
   const normalizedQuality = normalizeQuality(quality);
   const normalizedCompatibilities = normalizeCompatibilities(compatibilities);
+  const normalizedSpecifications = normalizeSpecifications(specifications);
+  const metadata = normalizePartMetadata({ category, brand, manufacturerPartNumber, applicabilityReviewNote });
+  const applicabilityProvided = Object.prototype.hasOwnProperty.call(req.body, "applicabilityType");
+  const normalizedApplicability = normalizeApplicabilityType(applicabilityType)
+    || (!applicabilityProvided && normalizedCompatibilities.items.length ? "vehicle" : null);
 
   if (!normalizedName) {
     return res.status(400).json({ ok: false, message: "name is required" });
@@ -505,6 +550,23 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
   if (normalizedCompatibilities.error) {
     return res.status(400).json({ ok: false, message: normalizedCompatibilities.error });
   }
+  if (normalizedSpecifications.error) {
+    return res.status(400).json({ ok: false, message: normalizedSpecifications.error });
+  }
+
+  const applicability = validateApplicability({
+    applicabilityType: normalizedApplicability,
+    applicabilityProvided: applicabilityProvided || normalizedCompatibilities.items.length > 0,
+    category: metadata.category,
+    specifications: normalizedSpecifications.items,
+    compatibilityCount: normalizedCompatibilities.items.length,
+    privileged: isPrivileged(req),
+    reviewNote: metadata.applicabilityReviewNote,
+    universalConfirmed: universalConfirmed === true,
+  });
+  if (applicability.error) {
+    return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: applicability.error });
+  }
 
   const id = genId("part");
   try {
@@ -513,8 +575,10 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
       try {
         await client.query(
           `INSERT INTO parts (
-             id, name, description, image_url, user_id, price_ngn, stock_qty, quality, role
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+             id, name, description, image_url, user_id, price_ngn, stock_qty, quality, role,
+             category, brand, manufacturer_part_number, applicability_type, specifications,
+             listing_status, applicability_review_note, applicability_reviewed_by, applicability_reviewed_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18)`,
           [
             id,
             normalizedName,
@@ -525,6 +589,15 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
             normalizedStockQty,
             normalizedQuality,
             normalizedRole,
+            metadata.category,
+            metadata.brand,
+            metadata.manufacturerPartNumber,
+            normalizedApplicability,
+            JSON.stringify(normalizedSpecifications.items),
+            applicability.status,
+            metadata.applicabilityReviewNote,
+            applicability.status === "published" && normalizedApplicability !== "vehicle" ? req.user?.id : null,
+            applicability.status === "published" && normalizedApplicability !== "vehicle" ? new Date() : null,
           ],
         );
         for (const compatibility of normalizedCompatibilities.items) {
@@ -571,12 +644,89 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
       stockQty: normalizedStockQty,
       quality: normalizedQuality,
       compatibilities: normalizedCompatibilities.items,
+      category: metadata.category,
+      brand: metadata.brand,
+      manufacturerPartNumber: metadata.manufacturerPartNumber,
+      applicabilityType: normalizedApplicability,
+      specifications: normalizedSpecifications.items,
+      listingStatus: applicability.status,
+      applicabilityReviewNote: metadata.applicabilityReviewNote,
       role: normalizedRole,
     });
   } catch (err) {
     log.error({ err, name: normalizedName }, "Part create failed");
     throw err;
   }
+});
+
+router.patch("/:partId/applicability-review", requireRoles("admin", "staff"), async (req: Request, res: Response) => {
+  const partId = String(req.params.partId);
+  const decision = req.body?.decision === "changes_requested" ? "changes_requested" : req.body?.decision === "approve" ? "approve" : null;
+  const note = typeof req.body?.reviewNote === "string" ? req.body.reviewNote.trim() : "";
+  if (!decision) return res.status(400).json({ ok: false, message: "decision must be approve or changes_requested" });
+  if (!note) return res.status(400).json({ ok: false, message: "A review note is required" });
+  if (decision === "changes_requested") {
+    const result = await query(
+      `UPDATE parts SET listing_status='pending_review', applicability_review_note=$1,
+         applicability_reviewed_by=$2, applicability_reviewed_at=NOW()
+       WHERE id=$3 RETURNING id`,
+      [note, req.user?.id, partId],
+    );
+    return result.rowCount
+      ? res.json({ ok: true, listingStatus: "pending_review" })
+      : res.status(404).json({ ok: false, message: "Part not found" });
+  }
+
+  const normalizedCompatibilities = normalizeCompatibilities(req.body?.compatibilities);
+  const normalizedSpecifications = normalizeSpecifications(req.body?.specifications);
+  const metadata = normalizePartMetadata({
+    category: req.body?.category,
+    brand: req.body?.brand,
+    manufacturerPartNumber: req.body?.manufacturerPartNumber,
+    applicabilityReviewNote: note,
+  });
+  const applicabilityType = normalizeApplicabilityType(req.body?.applicabilityType);
+  if (normalizedCompatibilities.error || normalizedSpecifications.error) {
+    return res.status(400).json({ ok: false, message: normalizedCompatibilities.error || normalizedSpecifications.error });
+  }
+  const validation = validateApplicability({
+    applicabilityType,
+    applicabilityProvided: true,
+    category: metadata.category,
+    specifications: normalizedSpecifications.items,
+    compatibilityCount: normalizedCompatibilities.items.length,
+    privileged: true,
+    reviewNote: note,
+    universalConfirmed: req.body?.universalConfirmed === true,
+  });
+  if (validation.error) return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: validation.error });
+
+  const approved = await withClient(async (client) => {
+    await client.query("BEGIN");
+    try {
+      const result = await client.query(
+        `UPDATE parts SET category=$1, brand=$2, manufacturer_part_number=$3,
+           applicability_type=$4, specifications=$5::jsonb, listing_status='published',
+           applicability_review_note=$6, applicability_reviewed_by=$7, applicability_reviewed_at=NOW()
+         WHERE id=$8 RETURNING id`,
+        [metadata.category, metadata.brand, metadata.manufacturerPartNumber, applicabilityType,
+          JSON.stringify(normalizedSpecifications.items), note, req.user?.id, partId],
+      );
+      if (!result.rowCount) { await client.query("ROLLBACK"); return false; }
+      await client.query("DELETE FROM part_compatibilities WHERE part_id=$1", [partId]);
+      for (const compatibility of normalizedCompatibilities.items) {
+        await client.query(
+          "INSERT INTO part_compatibilities (id,part_id,make,model,year,trim) VALUES ($1,$2,$3,$4,$5,$6)",
+          [genId("fit"), partId, compatibility.make, compatibility.model, compatibility.year, compatibility.trim],
+        );
+      }
+      await client.query("COMMIT");
+      return true;
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+  });
+  return approved
+    ? res.json({ ok: true, listingStatus: "published" })
+    : res.status(404).json({ ok: false, message: "Part not found" });
 });
 
 router.post("/:partId/bargain", requireAuthenticated, async (req: Request, res: Response) => {
@@ -608,7 +758,7 @@ router.post("/:partId/bargain", requireAuthenticated, async (req: Request, res: 
   }>(
     `SELECT id, name, user_id, role, price_ngn
      FROM parts
-     WHERE id = $1
+     WHERE id = $1 AND listing_status = 'published'
      LIMIT 1`,
     [partId],
   );
@@ -696,7 +846,9 @@ router.post("/:partId/bargain", requireAuthenticated, async (req: Request, res: 
 router.patch("/:partId", requireAuthenticated, async (req: Request, res: Response) => {
   const partId = String(req.params.partId);
   const log = req.log;
-  const { name, description, imageUrl, priceNgn, stockQty, quality, compatibilities } = req.body as {
+  const { name, description, imageUrl, priceNgn, stockQty, quality, compatibilities,
+    category, brand, manufacturerPartNumber, applicabilityType, specifications,
+    applicabilityReviewNote, universalConfirmed } = req.body as {
     name?: string;
     description?: string;
     imageUrl?: string;
@@ -704,6 +856,13 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
     stockQty?: number | string;
     quality?: string | null;
     compatibilities?: unknown;
+    category?: unknown;
+    brand?: unknown;
+    manufacturerPartNumber?: unknown;
+    applicabilityType?: unknown;
+    specifications?: unknown;
+    applicabilityReviewNote?: unknown;
+    universalConfirmed?: boolean;
   };
 
   const normalizedName = typeof name === "string" ? name.trim() : undefined;
@@ -716,6 +875,10 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
   const normalizedQuality = normalizeQuality(quality);
   const hasCompatibilities = Object.prototype.hasOwnProperty.call(req.body, "compatibilities");
   const normalizedCompatibilities = normalizeCompatibilities(compatibilities);
+  const hasSpecifications = Object.prototype.hasOwnProperty.call(req.body, "specifications");
+  const hasApplicability = Object.prototype.hasOwnProperty.call(req.body, "applicabilityType");
+  const normalizedSpecifications = normalizeSpecifications(specifications);
+  const metadata = normalizePartMetadata({ category, brand, manufacturerPartNumber, applicabilityReviewNote });
 
   const ownerResult = await query<{ user_id: string | null }>(
     "SELECT user_id FROM parts WHERE id = $1 LIMIT 1",
@@ -739,6 +902,9 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
   }
   if (hasCompatibilities && normalizedCompatibilities.error) {
     return res.status(400).json({ ok: false, message: normalizedCompatibilities.error });
+  }
+  if (hasSpecifications && normalizedSpecifications.error) {
+    return res.status(400).json({ ok: false, message: normalizedSpecifications.error });
   }
 
   const fields: string[] = [];
@@ -772,6 +938,12 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
     fields.push(`quality = $${index++}`);
     values.push(normalizedQuality);
   }
+  if (category !== undefined) { fields.push(`category = $${index++}`); values.push(metadata.category); }
+  if (brand !== undefined) { fields.push(`brand = $${index++}`); values.push(metadata.brand); }
+  if (manufacturerPartNumber !== undefined) { fields.push(`manufacturer_part_number = $${index++}`); values.push(metadata.manufacturerPartNumber); }
+  if (hasApplicability) { fields.push(`applicability_type = $${index++}`); values.push(normalizeApplicabilityType(applicabilityType)); }
+  if (hasSpecifications) { fields.push(`specifications = $${index++}::jsonb`); values.push(JSON.stringify(normalizedSpecifications.items)); }
+  if (applicabilityReviewNote !== undefined) { fields.push(`applicability_review_note = $${index++}`); values.push(metadata.applicabilityReviewNote); }
 
   if (!fields.length && !hasCompatibilities) {
     return res.status(400).json({ ok: false, message: "No fields to update" });
@@ -781,6 +953,73 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
     const part = await withClient(async (client) => {
       await client.query("BEGIN");
       try {
+        // Serialize fitment edits with backfill and other listing updates.
+        const locked = await client.query<{
+          name: string; description: string | null; image_url: string | null; quality: string | null;
+          category: string | null; brand: string | null; manufacturer_part_number: string | null;
+          applicability_type: string | null; specifications: unknown; listing_status: string;
+          applicability_review_note: string | null;
+        }>(`SELECT name, description, image_url, quality, category, brand, manufacturer_part_number, applicability_type,
+                   specifications, listing_status, applicability_review_note
+            FROM parts WHERE id = $1 FOR UPDATE`, [partId]);
+        if (!locked.rows[0]) {
+          await client.query("ROLLBACK");
+          return undefined;
+        }
+        const existing = await client.query<{ make: string; model: string; year: number; trim: string | null }>(
+          "SELECT make, model, year, trim FROM part_compatibilities WHERE part_id = $1",
+          [partId],
+        );
+        const resultingCount = hasCompatibilities ? normalizedCompatibilities.items.length : existing.rows.length;
+        const currentSpecifications = Array.isArray(locked.rows[0].specifications)
+          ? locked.rows[0].specifications as Array<{ key: string; label: string; value: string }>
+          : [];
+        const resultingSpecifications = hasSpecifications ? normalizedSpecifications.items : currentSpecifications;
+        const resultingType = hasApplicability
+          ? normalizeApplicabilityType(applicabilityType)
+          : normalizeApplicabilityType(locked.rows[0].applicability_type) || (resultingCount > 0 ? "vehicle" : null);
+        const resultingCategory = category !== undefined ? metadata.category : locked.rows[0].category;
+        const compatibilityKeys = (items: Array<{ make: string; model: string; year: number; trim?: string | null }>) =>
+          items.map((item) => `${item.make.toLowerCase()}|${item.model.toLowerCase()}|${item.year}|${(item.trim || "").toLowerCase()}`).sort();
+        const criticalApplicabilityChange =
+          (normalizedName !== undefined && normalizedName !== locked.rows[0].name)
+          || (normalizedDescription !== undefined && (normalizedDescription || null) !== locked.rows[0].description)
+          || (normalizedImageUrl !== undefined && (normalizedImageUrl || null) !== locked.rows[0].image_url)
+          || (category !== undefined && metadata.category !== locked.rows[0].category)
+          || (brand !== undefined && metadata.brand !== locked.rows[0].brand)
+          || (manufacturerPartNumber !== undefined && metadata.manufacturerPartNumber !== locked.rows[0].manufacturer_part_number)
+          || (hasApplicability && normalizeApplicabilityType(applicabilityType) !== normalizeApplicabilityType(locked.rows[0].applicability_type))
+          || (hasSpecifications && JSON.stringify(normalizedSpecifications.items) !== JSON.stringify(currentSpecifications))
+          || (hasCompatibilities && JSON.stringify(compatibilityKeys(normalizedCompatibilities.items)) !== JSON.stringify(compatibilityKeys(existing.rows)));
+        const detailChanges = {
+          ...(normalizedName !== undefined ? { name: normalizedName } : {}),
+          ...(normalizedDescription !== undefined ? { description: normalizedDescription || null } : {}),
+          ...(normalizedImageUrl !== undefined ? { image_url: normalizedImageUrl || null } : {}),
+          ...(quality !== undefined ? { quality: normalizedQuality } : {}),
+        };
+        if (!resultingType && requiresFitmentRepair(locked.rows[0], detailChanges, existing.rows.length, resultingCount)) {
+          throw new FitmentRequiredError();
+        }
+        const applicabilityValidation = validateApplicability({
+          applicabilityType: resultingType,
+          applicabilityProvided: hasApplicability || !!resultingType,
+          category: resultingCategory,
+          specifications: resultingSpecifications,
+          compatibilityCount: resultingCount,
+          privileged: isPrivileged(req),
+          reviewNote: applicabilityReviewNote !== undefined ? metadata.applicabilityReviewNote : locked.rows[0].applicability_review_note,
+          universalConfirmed: universalConfirmed === true || (!criticalApplicabilityChange && resultingType === "universal"),
+          existing: true,
+        });
+        if (applicabilityValidation.error) {
+          const error = new Error(applicabilityValidation.error);
+          error.name = "ApplicabilityRequiredError";
+          throw error;
+        }
+        const resultingStatus = !isPrivileged(req) && criticalApplicabilityChange
+          && (resultingType === "specification" || resultingType === "universal")
+          ? "pending_review"
+          : criticalApplicabilityChange ? applicabilityValidation.status : locked.rows[0].listing_status;
         let row: {
           id: string;
           name: string;
@@ -789,7 +1028,9 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
           price_ngn: number | null;
           stock_qty: number | null;
           quality: string | null;
-          role: string | null;
+          role: string | null; category: string | null; brand: string | null;
+          manufacturer_part_number: string | null; applicability_type: string | null;
+          specifications: unknown; listing_status: string; applicability_review_note: string | null;
         } | undefined;
 
         if (fields.length > 0) {
@@ -802,12 +1043,16 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
             price_ngn: number | null;
             stock_qty: number | null;
             quality: string | null;
-            role: string | null;
+            role: string | null; category: string | null; brand: string | null;
+            manufacturer_part_number: string | null; applicability_type: string | null;
+            specifications: unknown; listing_status: string; applicability_review_note: string | null;
           }>(
             `UPDATE parts
              SET ${fields.join(", ")}
              WHERE id = $${index}
-             RETURNING id, name, description, image_url, price_ngn, stock_qty, quality, role`,
+             RETURNING id, name, description, image_url, price_ngn, stock_qty, quality, role,
+               category, brand, manufacturer_part_number, applicability_type, specifications,
+               listing_status, applicability_review_note`,
             updateValues,
           );
           row = result.rows[0];
@@ -820,9 +1065,13 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
             price_ngn: number | null;
             stock_qty: number | null;
             quality: string | null;
-            role: string | null;
+            role: string | null; category: string | null; brand: string | null;
+            manufacturer_part_number: string | null; applicability_type: string | null;
+            specifications: unknown; listing_status: string; applicability_review_note: string | null;
           }>(
-            `SELECT id, name, description, image_url, price_ngn, stock_qty, quality, role
+            `SELECT id, name, description, image_url, price_ngn, stock_qty, quality, role,
+               category, brand, manufacturer_part_number, applicability_type, specifications,
+               listing_status, applicability_review_note
              FROM parts WHERE id = $1`,
             [partId],
           );
@@ -852,6 +1101,19 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
           }
         }
 
+        const reviewerId = isPrivileged(req) && resultingStatus === "published" && resultingType !== "vehicle"
+          ? req.user?.id : null;
+        await client.query(
+          `UPDATE parts SET listing_status=$1,
+             applicability_reviewed_by=CASE WHEN $2::text IS NOT NULL THEN $2 ELSE applicability_reviewed_by END,
+             applicability_reviewed_at=CASE WHEN $2::text IS NOT NULL THEN NOW() ELSE applicability_reviewed_at END,
+             applicability_type=COALESCE(applicability_type, $4)
+           WHERE id=$3`,
+          [resultingStatus, reviewerId, partId, resultingType],
+        );
+        row.listing_status = resultingStatus;
+        row.applicability_type = resultingType;
+
         await client.query("COMMIT");
         return row;
       } catch (error) {
@@ -877,10 +1139,23 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
         priceNgn: part.price_ngn,
         stockQty: part.stock_qty,
         quality: part.quality,
+        category: part.category,
+        brand: part.brand,
+        manufacturerPartNumber: part.manufacturer_part_number,
+        applicabilityType: part.applicability_type,
+        specifications: Array.isArray(part.specifications) ? part.specifications : [],
+        listingStatus: part.listing_status,
+        applicabilityReviewNote: part.applicability_review_note,
         compatibilities: currentCompatibilities,
       },
     });
   } catch (err) {
+    if (err instanceof FitmentRequiredError) {
+      return res.status(422).json({ ok: false, code: "FITMENT_REQUIRED", message: err.message });
+    }
+    if (err instanceof Error && err.name === "ApplicabilityRequiredError") {
+      return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: err.message });
+    }
     log.error({ err, partId }, "Part update failed");
     throw err;
   }
@@ -1678,6 +1953,13 @@ router.get("/:partId", async (req: Request, res: Response) => {
     stock_qty: number | null;
     quality: string | null;
     role: string | null;
+    category: string | null;
+    brand: string | null;
+    manufacturer_part_number: string | null;
+    applicability_type: string | null;
+    specifications: unknown;
+    listing_status: string;
+    applicability_review_note: string | null;
     created_at: string;
   }> = [];
   try {
@@ -1692,6 +1974,13 @@ router.get("/:partId", async (req: Request, res: Response) => {
       stock_qty: number | null;
       quality: string | null;
       role: string | null;
+      category: string | null;
+      brand: string | null;
+      manufacturer_part_number: string | null;
+      applicability_type: string | null;
+      specifications: unknown;
+      listing_status: string;
+      applicability_review_note: string | null;
       created_at: string;
     }>(
       `SELECT
@@ -1708,6 +1997,13 @@ router.get("/:partId", async (req: Request, res: Response) => {
          p.stock_qty,
          p.quality,
          p.role,
+         p.category,
+         p.brand,
+         p.manufacturer_part_number,
+         p.applicability_type,
+         p.specifications,
+         p.listing_status,
+         p.applicability_review_note,
          p.created_at
        FROM parts p
        LEFT JOIN users u ON u.id = p.user_id
@@ -1747,6 +2043,13 @@ router.get("/:partId", async (req: Request, res: Response) => {
       price_ngn: null,
       stock_qty: null,
       quality: null,
+      category: null,
+      brand: null,
+      manufacturer_part_number: null,
+      applicability_type: null,
+      specifications: [],
+      listing_status: "published",
+      applicability_review_note: null,
     }));
   }
 
@@ -1754,8 +2057,14 @@ router.get("/:partId", async (req: Request, res: Response) => {
   if (!part) {
     return res.status(404).json({ ok: false, message: "Part not found" });
   }
+  if (part.listing_status === "pending_review") {
+    const user = await authenticateRequest(req);
+    const allowed = !!user && (user.id === part.user_id || ["admin", "staff"].includes(user.role));
+    if (!allowed) return res.status(404).json({ ok: false, message: "Part not found" });
+    req.user = user;
+  }
   const compatibilities = (await loadPartCompatibilities([part.id])).get(part.id) || [];
-  const images = (await loadPartImageGalleries(req, [part])).get(part.id) || [];
+  const images = (await loadPartImageGalleries(req, [part], part.listing_status === "pending_review")).get(part.id) || [];
 
   return res.json({
     ok: true,
@@ -1768,6 +2077,15 @@ router.get("/:partId", async (req: Request, res: Response) => {
       priceNgn: part.price_ngn,
       stockQty: part.stock_qty,
       quality: part.quality,
+      category: part.category,
+      brand: part.brand,
+      manufacturerPartNumber: part.manufacturer_part_number,
+      applicabilityType: part.applicability_type,
+      specifications: Array.isArray(part.specifications) ? part.specifications : [],
+      listingStatus: part.listing_status,
+      applicabilityReviewNote: part.listing_status === "pending_review" || part.applicability_type === "universal"
+        ? part.applicability_review_note
+        : null,
       images,
       compatibilities,
     },

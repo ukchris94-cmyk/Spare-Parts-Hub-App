@@ -50,6 +50,7 @@ export type PublicPartImage = {
 export async function loadPartImageGalleries(
   req: Request,
   parts: Array<{ id: string; image_url: string | null }>,
+  privateRead = false,
 ): Promise<Map<string, PublicPartImage[]>> {
   const galleries = new Map<string, PublicPartImage[]>();
   if (parts.length === 0) return galleries;
@@ -82,9 +83,10 @@ export async function loadPartImageGalleries(
   const primaryByPart = new Map(parts.map((part) => [part.id, part.image_url]));
   for (const row of result.rows) {
     const current = galleries.get(row.part_id) || [];
+    const privateUrl = privateRead ? await mediaReadUrlForStorageUri(row.storage_uri) : null;
     current.push({
       id: row.media_id,
-      url: `${publicApiBaseUrl(req)}/media/${encodeURIComponent(row.media_id)}/content`,
+      url: privateUrl || `${publicApiBaseUrl(req)}/media/${encodeURIComponent(row.media_id)}/content`,
       isPrimary: primaryByPart.get(row.part_id) === row.storage_uri,
       imageKind: row.image_kind,
       sourceName: row.source_name,
@@ -99,9 +101,12 @@ export async function loadPartImageGalleries(
   for (const part of parts) {
     const current = galleries.get(part.id) || [];
     if (part.image_url && !current.some((image) => image.isPrimary)) {
+      const privatePrimary = privateRead && part.image_url.startsWith("s3://")
+        ? await mediaReadUrlForStorageUri(part.image_url)
+        : null;
       current.unshift({
         id: null,
-        url: publicPartImageUrl(req, part.id, part.image_url) || "",
+        url: privatePrimary || publicPartImageUrl(req, part.id, part.image_url) || "",
         isPrimary: true,
         imageKind: "inventory",
         sourceName: null,

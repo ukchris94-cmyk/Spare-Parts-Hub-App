@@ -282,7 +282,7 @@ async function reserveInventory(
     const result = await client.query<{ stock_qty: number | null }>(
       `UPDATE parts
        SET stock_qty = stock_qty - $2
-       WHERE id = $1 AND stock_qty IS NOT NULL AND stock_qty >= $2
+       WHERE id = $1 AND listing_status = 'published' AND stock_qty IS NOT NULL AND stock_qty >= $2
        RETURNING stock_qty`,
       [partId, quantity]
     );

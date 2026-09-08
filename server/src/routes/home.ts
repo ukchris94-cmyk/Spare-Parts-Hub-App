@@ -214,6 +214,7 @@ router.get("/user", async (req: Request, res: Response) => {
              ELSE image_url
            END AS image_url
          FROM parts
+         WHERE listing_status = 'published'
          ORDER BY created_at DESC
          LIMIT 8`
       );
@@ -231,6 +232,7 @@ router.get("/user", async (req: Request, res: Response) => {
              ELSE image_url
            END AS image_url
          FROM parts
+         WHERE listing_status = 'published'
          ORDER BY id DESC
          LIMIT 8`
       );
