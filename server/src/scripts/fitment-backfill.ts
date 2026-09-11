@@ -18,6 +18,45 @@ function durableWriter(path: string) {
     close() { closeSync(fd); },
   };
 }
+function durableTextFile(path: string, value: string) {
+  const fd = openSync(path, "wx", 0o600);
+  try {
+    const buffer = Buffer.from(value);
+    let offset = 0;
+    while (offset < buffer.length) offset += writeSync(fd, buffer, offset);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+function csvCell(value: unknown): string {
+  const text = value === null || value === undefined ? "" : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+function reportCsv(report: z.infer<typeof reportSchema>): string {
+  const header = [
+    "listing_id", "vendor_id", "vendor_name", "name", "stored_category", "status",
+    "description", "proposed_make", "proposed_model", "proposed_year", "evidence",
+    "trim_confirmation_required", "advisory_specifications", "reason",
+  ];
+  const rows = report.entries.map((entry) => [
+    entry.source.id,
+    entry.source.userId,
+    entry.source.vendorName,
+    entry.source.name,
+    entry.source.category,
+    entry.status,
+    entry.source.description,
+    entry.proposal?.make,
+    entry.proposal?.model,
+    entry.proposal?.year,
+    entry.evidence,
+    entry.requiresTrimConfirmation,
+    entry.advisorySpecifications.map((item) => `${item.label}: ${item.value} [${item.evidence}]`).join("; "),
+    entry.reason,
+  ]);
+  return [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\n") + "\n";
+}
 function required(value: string | undefined, name: string): string {
   if (!value) throw new Error("Missing --" + name);
   return value;
@@ -32,6 +71,7 @@ export async function main() {
     allowPositionals: true,
     options: {
       catalog: { type: "string" }, out: { type: "string" },
+      csv: { type: "string" },
       report: { type: "string" }, approval: { type: "string" }, journal: { type: "string" },
       "confirm-database": { type: "string" }, execute: { type: "boolean", default: false },
     },
@@ -54,10 +94,16 @@ export async function main() {
     }
     if (mode === "audit") {
       const catalogText = readFileSync(required(values.catalog, "catalog"), "utf8");
+      const csvPath = required(values.csv, "csv");
+      if (csvPath === outputPath) throw new Error("--csv and --out must use different paths");
       const catalog = catalogSchema.parse(JSON.parse(catalogText));
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const result = await client.query<Source & { has_fitment: boolean }>(
-        "SELECT p.id, p.name, p.description, EXISTS (SELECT 1 FROM part_compatibilities pc WHERE pc.part_id=p.id) AS has_fitment FROM parts p ORDER BY p.id",
+        `SELECT p.id, p.name, p.description, p.user_id AS "userId",
+           COALESCE(NULLIF(u.business_name, ''), NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS "vendorName",
+           p.category, p.applicability_type AS "applicabilityType",
+           EXISTS (SELECT 1 FROM part_compatibilities pc WHERE pc.part_id=p.id) AS has_fitment
+         FROM parts p LEFT JOIN users u ON u.id=p.user_id ORDER BY p.id`,
       );
       const entries = result.rows.map(({ has_fitment, ...source }) => proposeFitment(source, catalog, has_fitment));
       await client.query("COMMIT");
@@ -66,9 +112,10 @@ export async function main() {
         skipped: entries.filter((e) => e.status === "skipped").length,
         alreadyComplete: entries.filter((e) => e.status === "already-complete").length,
       };
-      const report = reportSchema.parse({ version: 1, database, generatedAt: new Date().toISOString(), catalogSha256: sha256(catalogText), counts, entries });
+      const report = reportSchema.parse({ version: 2, database, generatedAt: new Date().toISOString(), catalogSha256: sha256(catalogText), counts, entries });
       output = durableWriter(outputPath);
       output.write(report);
+      durableTextFile(csvPath, reportCsv(report));
       console.log(JSON.stringify({ database, counts, reportSha256: sha256(readFileSync(outputPath, "utf8")) }));
       return;
     }
@@ -95,7 +142,7 @@ export async function main() {
         return { candidate, fitment: { ...candidate.proposal, trim: selection.confirmedTrim } };
       });
       output = durableWriter(outputPath);
-      output.write({ type: "header", version: 1, database, reportSha256: sha256(reportText), approvalSha256: sha256(approvalText), approval, startedAt: new Date().toISOString() });
+      output.write({ type: "header", version: 2, database, reportSha256: sha256(reportText), approvalSha256: sha256(approvalText), approval, startedAt: new Date().toISOString() });
       const counts = { applied: 0, skipped: 0, failed: 0 };
       for (const selection of selections) {
         try {
@@ -116,7 +163,7 @@ export async function main() {
     }
     const journal = readFileSync(required(values.journal, "journal"), "utf8");
     const records: unknown[] = journal.trim().split("\n").map((line) => JSON.parse(line));
-    const header = z.object({ type: z.literal("header"), version: z.literal(1), database: z.string() }).parse(records[0]);
+    const header = z.object({ type: z.literal("header"), version: z.literal(2), database: z.string() }).parse(records[0]);
     if (header.database !== database) throw new Error("Journal belongs to another database");
     const receipts = records.filter((record: any) => record?.type === "prepared").map((record) => preparedSchema.parse(record));
     output = durableWriter(outputPath);
@@ -126,10 +173,10 @@ export async function main() {
       try {
         const status = await rollbackCandidate(client, receipt);
         counts[status === "removed" ? "removed" : "skipped"]++;
-        output.write({ type: "rollback-result", id: receipt.after.id, status });
+        output.write({ type: "rollback-result", id: receipt.after.compatibility.id, status });
       } catch (error) {
         counts.failed++;
-        output.write({ type: "rollback-result", id: receipt.after.id, status: "failed", error: String(error) });
+        output.write({ type: "rollback-result", id: receipt.after.compatibility.id, status: "failed", error: String(error) });
         process.exitCode = 1;
         break;
       }

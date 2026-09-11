@@ -450,12 +450,8 @@ router.get("/:partId/image", async (req: Request, res: Response) => {
 
 router.delete("/:partId/images/primary", requireAuthenticated, async (req: Request, res: Response) => {
   const partId = String(req.params.partId);
-  const owner = await query<{ user_id: string | null; has_applicability: boolean }>(
-    `SELECT p.user_id,
-       (p.applicability_type IS NOT NULL OR EXISTS (
-         SELECT 1 FROM part_compatibilities pc WHERE pc.part_id = p.id
-       )) AS has_applicability
-     FROM parts p WHERE p.id = $1 LIMIT 1`,
+  const owner = await query<{ user_id: string | null }>(
+    "SELECT user_id FROM parts WHERE id = $1 LIMIT 1",
     [partId],
   );
   if (!owner.rows[0]) {
@@ -463,9 +459,6 @@ router.delete("/:partId/images/primary", requireAuthenticated, async (req: Reque
   }
   if (!isPrivileged(req) && owner.rows[0].user_id !== req.user?.id) {
     return res.status(403).json({ ok: false, message: "Not authorized to update this part" });
-  }
-  if (!owner.rows[0].has_applicability) {
-    return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: "Choose how this product is matched before changing its photos" });
   }
   await query(
     `UPDATE parts
@@ -664,8 +657,13 @@ router.patch("/:partId/applicability-review", requireRoles("admin", "staff"), as
   const decision = req.body?.decision === "changes_requested" ? "changes_requested" : req.body?.decision === "approve" ? "approve" : null;
   const note = typeof req.body?.reviewNote === "string" ? req.body.reviewNote.trim() : "";
   if (!decision) return res.status(400).json({ ok: false, message: "decision must be approve or changes_requested" });
-  if (!note) return res.status(400).json({ ok: false, message: "A review note is required" });
   if (decision === "changes_requested") {
+    if (!note) return res.status(422).json({
+      ok: false,
+      code: "REVIEW_NOTE_REQUIRED",
+      message: "Add a note explaining what must be changed.",
+      fieldErrors: { reviewNote: "A review note is required when returning a listing." },
+    });
     const result = await query(
       `UPDATE parts SET listing_status='pending_review', applicability_review_note=$1,
          applicability_reviewed_by=$2, applicability_reviewed_at=NOW()
@@ -687,46 +685,177 @@ router.patch("/:partId/applicability-review", requireRoles("admin", "staff"), as
   });
   const applicabilityType = normalizeApplicabilityType(req.body?.applicabilityType);
   if (normalizedCompatibilities.error || normalizedSpecifications.error) {
-    return res.status(400).json({ ok: false, message: normalizedCompatibilities.error || normalizedSpecifications.error });
+    const message = normalizedCompatibilities.error || normalizedSpecifications.error || "Invalid applicability data.";
+    req.log.warn({
+      partId,
+      code: "APPLICABILITY_INVALID",
+      fields: Object.keys(req.body || {}).sort(),
+    }, "Applicability review validation failed");
+    return res.status(422).json({ ok: false, code: "APPLICABILITY_INVALID", message });
   }
-  const validation = validateApplicability({
-    applicabilityType,
-    applicabilityProvided: true,
-    category: metadata.category,
-    specifications: normalizedSpecifications.items,
-    compatibilityCount: normalizedCompatibilities.items.length,
-    privileged: true,
-    reviewNote: note,
-    universalConfirmed: req.body?.universalConfirmed === true,
-  });
-  if (validation.error) return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: validation.error });
 
-  const approved = await withClient(async (client) => {
+  type ReviewFailure = {
+    ok: false;
+    status: number;
+    code: string;
+    message: string;
+    fieldErrors?: Record<string, string>;
+  };
+  const reviewResult = await withClient(async (client): Promise<ReviewFailure | { ok: true; part: Record<string, unknown> }> => {
     await client.query("BEGIN");
     try {
-      const result = await client.query(
-        `UPDATE parts SET category=$1, brand=$2, manufacturer_part_number=$3,
-           applicability_type=$4, specifications=$5::jsonb, listing_status='published',
-           applicability_review_note=$6, applicability_reviewed_by=$7, applicability_reviewed_at=NOW()
-         WHERE id=$8 RETURNING id`,
-        [metadata.category, metadata.brand, metadata.manufacturerPartNumber, applicabilityType,
-          JSON.stringify(normalizedSpecifications.items), note, req.user?.id, partId],
+      const locked = await client.query<{
+        id: string;
+        name: string;
+        description: string | null;
+        image_url: string | null;
+        price_ngn: number | null;
+        stock_qty: number | null;
+        quality: string | null;
+        role: string | null;
+        category: string | null;
+        brand: string | null;
+        manufacturer_part_number: string | null;
+        applicability_type: string | null;
+        specifications: unknown;
+        applicability_review_note: string | null;
+      }>(
+        `SELECT id, name, description, image_url, price_ngn, stock_qty, quality, role,
+           category, brand, manufacturer_part_number, applicability_type, specifications,
+           applicability_review_note
+         FROM parts WHERE id=$1 FOR UPDATE`,
+        [partId],
       );
-      if (!result.rowCount) { await client.query("ROLLBACK"); return false; }
+
+      const current = locked.rows[0];
+      if (!current) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 404, code: "PART_NOT_FOUND", message: "Part not found" };
+      }
+
+      const existingCompatibilities = await client.query<PartCompatibility>(
+        "SELECT make, model, year, trim FROM part_compatibilities WHERE part_id=$1 ORDER BY make, model, year, trim NULLS FIRST",
+        [partId],
+      );
+      const bodyHas = (key: string) => Object.prototype.hasOwnProperty.call(req.body || {}, key);
+      const finalName = bodyHas("name") && typeof req.body.name === "string" ? req.body.name.trim() : current.name;
+      const finalDescription = bodyHas("description")
+        ? typeof req.body.description === "string" && req.body.description.trim() ? req.body.description.trim() : null
+        : current.description;
+      const finalPrice = bodyHas("priceNgn") ? toNullableInt(req.body.priceNgn) : current.price_ngn;
+      const finalStock = bodyHas("stockQty") ? toNullableInt(req.body.stockQty) : current.stock_qty;
+      const finalQuality = bodyHas("quality") ? normalizeQuality(req.body.quality) : current.quality;
+      const finalCategory = bodyHas("category") ? metadata.category : current.category;
+      const finalBrand = bodyHas("brand") ? metadata.brand : current.brand;
+      const finalPartNumber = bodyHas("manufacturerPartNumber")
+        ? metadata.manufacturerPartNumber
+        : current.manufacturer_part_number;
+      const finalType = bodyHas("applicabilityType")
+        ? applicabilityType
+        : normalizeApplicabilityType(current.applicability_type);
+      const currentSpecifications = Array.isArray(current.specifications)
+        ? current.specifications as Array<{ key: string; label: string; value: string }>
+        : [];
+      const finalSpecifications = bodyHas("specifications")
+        ? normalizedSpecifications.items
+        : currentSpecifications;
+      const finalCompatibilities = bodyHas("compatibilities")
+        ? normalizedCompatibilities.items
+        : existingCompatibilities.rows;
+      const fieldErrors: Record<string, string> = {};
+      if (!finalName) fieldErrors.name = "Part name is required.";
+      if (!finalCategory) fieldErrors.category = "Choose a product category.";
+      if (finalPrice === null || finalPrice <= 0) fieldErrors.priceNgn = "Enter a price greater than zero.";
+      if (finalStock === null || finalStock < 0) fieldErrors.stockQty = "Stock must be zero or greater.";
+      if (!finalQuality) fieldErrors.quality = "Select the assessed quality.";
+
+      const applicabilityValidation = validateApplicability({
+        applicabilityType: finalType,
+        applicabilityProvided: true,
+        category: finalCategory,
+        specifications: finalSpecifications,
+        compatibilityCount: finalCompatibilities.length,
+        privileged: true,
+        reviewNote: note,
+        universalConfirmed: req.body?.universalConfirmed === true,
+      });
+      if (applicabilityValidation.error) fieldErrors.applicability = applicabilityValidation.error;
+      if (Object.keys(fieldErrors).length) {
+        await client.query("ROLLBACK");
+        const message = Object.values(fieldErrors)[0];
+        return { ok: false, status: 422, code: "REVIEW_VALIDATION_FAILED", message, fieldErrors };
+      }
+
+      const storedSpecifications = finalType === "specification" ? finalSpecifications : [];
+      const storedReviewNote = finalType === "universal" ? note : null;
+      const result = await client.query<{
+        id: string;
+        name: string;
+        description: string | null;
+        image_url: string | null;
+        price_ngn: number | null;
+        stock_qty: number | null;
+        quality: string | null;
+        role: string | null;
+        category: string | null;
+        brand: string | null;
+        manufacturer_part_number: string | null;
+        applicability_type: string | null;
+        specifications: unknown;
+        listing_status: string;
+        applicability_review_note: string | null;
+      }>(
+        `UPDATE parts SET name=$1, description=$2, price_ngn=$3, stock_qty=$4, quality=$5,
+           category=$6, brand=$7, manufacturer_part_number=$8, applicability_type=$9,
+           specifications=$10::jsonb, listing_status='published', applicability_review_note=$11,
+           applicability_reviewed_by=$12, applicability_reviewed_at=NOW()
+         WHERE id=$13
+         RETURNING id, name, description, image_url, price_ngn, stock_qty, quality, role,
+           category, brand, manufacturer_part_number, applicability_type, specifications,
+           listing_status, applicability_review_note`,
+        [finalName, finalDescription, finalPrice, finalStock, finalQuality, finalCategory,
+          finalBrand, finalPartNumber, finalType, JSON.stringify(storedSpecifications),
+          storedReviewNote, req.user?.id, partId],
+      );
+
       await client.query("DELETE FROM part_compatibilities WHERE part_id=$1", [partId]);
-      for (const compatibility of normalizedCompatibilities.items) {
+      for (const compatibility of finalType === "vehicle" ? finalCompatibilities : []) {
         await client.query(
           "INSERT INTO part_compatibilities (id,part_id,make,model,year,trim) VALUES ($1,$2,$3,$4,$5,$6)",
           [genId("fit"), partId, compatibility.make, compatibility.model, compatibility.year, compatibility.trim],
         );
       }
       await client.query("COMMIT");
-      return true;
+      const row = result.rows[0];
+      return {
+        ok: true,
+        part: {
+          ...row,
+          image_url: publicPartImageUrl(req, row.id, row.image_url),
+          imageUrl: publicPartImageUrl(req, row.id, row.image_url),
+          priceNgn: row.price_ngn,
+          stockQty: row.stock_qty,
+          manufacturerPartNumber: row.manufacturer_part_number,
+          applicabilityType: row.applicability_type,
+          specifications: Array.isArray(row.specifications) ? row.specifications : [],
+          listingStatus: row.listing_status,
+          applicabilityReviewNote: row.applicability_review_note,
+          compatibilities: finalType === "vehicle" ? finalCompatibilities : [],
+        },
+      };
     } catch (error) { await client.query("ROLLBACK"); throw error; }
   });
-  return approved
-    ? res.json({ ok: true, listingStatus: "published" })
-    : res.status(404).json({ ok: false, message: "Part not found" });
+  if (!reviewResult.ok) {
+    req.log.warn({
+      partId,
+      applicabilityType,
+      code: reviewResult.code,
+      fields: Object.keys(req.body || {}).sort(),
+    }, "Applicability review validation failed");
+    return res.status(reviewResult.status).json(reviewResult);
+  }
+  req.log.info({ partId, applicabilityType }, "Applicability review approved");
+  return res.json({ ok: true, listingStatus: "published", part: reviewResult.part });
 });
 
 router.post("/:partId/bargain", requireAuthenticated, async (req: Request, res: Response) => {

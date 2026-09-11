@@ -9,20 +9,31 @@ export const fitmentSchema = z.object({
 }).strict();
 export type Fitment = z.infer<typeof fitmentSchema>;
 export const sourceSchema = z.object({
-  id: z.string().min(1), name: z.string(), description: z.string().nullable(),
+  id: z.string().min(1),
+  name: z.string(),
+  description: z.string().nullable(),
+  userId: z.string().nullable(),
+  vendorName: z.string().nullable(),
+  category: z.string().nullable(),
+  applicabilityType: z.enum(["vehicle", "specification", "universal"]).nullable(),
 }).strict();
 export type Source = z.infer<typeof sourceSchema>;
 export const catalogSchema = z.record(z.string(), z.array(z.string()));
 export type Catalog = z.infer<typeof catalogSchema>;
+export const advisorySpecificationSchema = z.object({
+  key: z.string(), label: z.string(), value: z.string(), evidence: z.string(),
+}).strict();
+export type AdvisorySpecification = z.infer<typeof advisorySpecificationSchema>;
 export const candidateSchema = z.object({
   source: sourceSchema,
   status: z.enum(["candidate", "skipped", "already-complete"]),
   proposal: fitmentSchema.nullable(), evidence: z.string(), reason: z.string(),
   requiresTrimConfirmation: z.boolean(),
+  advisorySpecifications: z.array(advisorySpecificationSchema),
 }).strict();
 export type Candidate = z.infer<typeof candidateSchema>;
 export const reportSchema = z.object({
-  version: z.literal(1), database: z.string(), generatedAt: z.string(), catalogSha256: z.string(),
+  version: z.literal(2), database: z.string(), generatedAt: z.string(), catalogSha256: z.string(),
   counts: z.object({ candidate: z.number(), skipped: z.number(), alreadyComplete: z.number() }),
   entries: z.array(candidateSchema),
 }).strict();
@@ -43,11 +54,41 @@ export function sha256(value: string): string {
 }
 function escapeRegex(value: string) { return value.replace(/[.*+?^$()|[\]{}\\]/g, "\\$&"); }
 
+function firstMatch(text: string, expression: RegExp): string | null {
+  const match = expression.exec(text);
+  return match?.[1]?.trim() || match?.[0]?.trim() || null;
+}
+
+export function proposeAdvisorySpecifications(source: Source): AdvisorySpecification[] {
+  const text = source.description || "";
+  if (!text.trim()) return [];
+  const findings: AdvisorySpecification[] = [];
+  const add = (key: string, label: string, value: string | null, evidence = value) => {
+    if (!value || findings.some((item) => item.key === key)) return;
+    findings.push({ key, label, value, evidence: evidence || value });
+  };
+
+  add("tire_size", "Tire size", firstMatch(text, /\b(\d{3}\s*\/\s*\d{2,3}\s*R\s*\d{2})\b/i));
+  add("grade_viscosity", "Oil grade / viscosity", firstMatch(text, /\b((?:0|5|10|15|20|25)W[- ]?(?:16|20|30|40|50|60))\b/i));
+  add("pack_size", "Pack size", firstMatch(text, /\b(\d+(?:\.\d+)?\s*(?:ml|l|litres?|kg|g))\b/i));
+  add("bulb_socket_type", "Bulb or socket type", firstMatch(text, /\b(?:bulb|socket)(?:\s+type)?\s*[:=-]\s*([A-Z0-9-]{2,20})\b/i));
+  add("battery_code_size", "Battery code or size", firstMatch(text, /\bbattery(?:\s+(?:code|size))?\s*[:=-]\s*([A-Z0-9-]{2,30})\b/i));
+  add("part_number", "Manufacturer or cross-reference number", firstMatch(text, /\b(?:manufacturer\s+)?(?:part|cross-reference)\s*(?:number|no\.?|#)\s*[:=-]\s*([A-Z0-9][A-Z0-9./-]{2,50})\b/i));
+  const productType = firstMatch(text, /\b(engine oil|motor oil|transmission fluid|brake fluid|coolant|antifreeze)\b/i);
+  add("product_type", "Product type", productType);
+  return findings;
+}
+
 // Deliberately accepts only a complete, standalone vehicle declaration.
 export function proposeFitment(source: Source, catalog: Catalog, hasFitment = false): Candidate {
+  const advisorySpecifications = proposeAdvisorySpecifications(source);
   const result: Candidate = {
     source, status: "skipped", proposal: null, evidence: "", reason: "", requiresTrimConfirmation: false,
+    advisorySpecifications,
   };
+  if (source.applicabilityType !== null) {
+    return { ...result, status: "already-complete", reason: "Structured applicability already exists." };
+  }
   if (hasFitment) return { ...result, status: "already-complete", reason: "Structured fitment already exists." };
   const text = source.description || "";
   if (!text.trim()) return { ...result, reason: "No description; enter verified make, model, and year." };

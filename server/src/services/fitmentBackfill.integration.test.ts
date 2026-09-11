@@ -21,9 +21,12 @@ test("isolated PostgreSQL backfill rehearsal", { skip: !url, timeout: 20000 }, a
     await client.query('CREATE SCHEMA "' + schema + '"');
     created = true;
     await client.query('SET search_path TO "' + schema + '"');
-    await client.query("CREATE TABLE parts (id text PRIMARY KEY, name text NOT NULL, description text)");
+    await client.query("CREATE TABLE parts (id text PRIMARY KEY, name text NOT NULL, description text, user_id text, category text, applicability_type text)");
     await client.query("CREATE TABLE part_compatibilities (id text PRIMARY KEY, part_id text NOT NULL REFERENCES parts(id), make text NOT NULL, model text NOT NULL, year integer NOT NULL CHECK (year BETWEEN 1900 AND 2200), trim text, created_at timestamptz NOT NULL DEFAULT now())");
-    const source = { id: "p1", name: "Sensor", description: "Toyota Camry 2014" };
+    const source = {
+      id: "p1", name: "Sensor", description: "Toyota Camry 2014",
+      userId: null, vendorName: null, category: null, applicabilityType: null,
+    };
     const candidate = proposeFitment(source, { Toyota: ["Camry"] });
     const f = candidate.proposal!;
     await client.query("INSERT INTO parts VALUES ($1,$2,$3)", [source.id, source.name, source.description]);
@@ -32,8 +35,10 @@ test("isolated PostgreSQL backfill rehearsal", { skip: !url, timeout: 20000 }, a
       assert.equal(await applyCandidate(client, candidate, f, (entry) => { receipt = entry; }), "applied");
       const saved = await client.query("SELECT make, model, year, trim FROM part_compatibilities");
       assert.deepEqual(saved.rows, [f]);
-      assert.equal(await applyCandidate(client, candidate, f, () => assert.fail()), "already-has-fitment");
+      assert.equal((await client.query("SELECT applicability_type FROM parts WHERE id='p1'")).rows[0].applicability_type, "vehicle");
+      assert.equal(await applyCandidate(client, candidate, f, () => assert.fail()), "already-classified");
       assert.equal(await rollbackCandidate(client, receipt), "removed");
+      assert.equal((await client.query("SELECT applicability_type FROM parts WHERE id='p1'")).rows[0].applicability_type, null);
       assert.equal(await rollbackCandidate(client, receipt), "unchanged-check-failed");
     });
     await t.test("journal failure rolls back actual insertion", async () => {
@@ -42,9 +47,10 @@ test("isolated PostgreSQL backfill rehearsal", { skip: !url, timeout: 20000 }, a
     });
     await t.test("later edit prevents rollback, even if visible values are the same", async () => {
       await applyCandidate(client, candidate, f, (entry) => { receipt = entry; });
-      await client.query("UPDATE part_compatibilities SET model=model WHERE id=$1", [receipt.after.id]);
+      await client.query("UPDATE part_compatibilities SET model=model WHERE id=$1", [receipt.after.compatibility.id]);
       assert.equal(await rollbackCandidate(client, receipt), "unchanged-check-failed");
       await client.query("DELETE FROM part_compatibilities");
+      await client.query("UPDATE parts SET applicability_type=NULL WHERE id='p1'");
     });
     await t.test("concurrent description change is rechecked under the lock", async () => {
       other = await pool.connect();

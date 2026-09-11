@@ -4,21 +4,40 @@ import type { PoolClient } from "pg";
 import { applyCandidate, rollbackCandidate, type Prepared } from "./fitmentBackfillDb";
 import { proposeFitment } from "./fitmentBackfill";
 
-const source = { id: "part_test", name: "Sensor", description: "Toyota Camry 2014" };
+const source = {
+  id: "part_test", name: "Sensor", description: "Toyota Camry 2014",
+  userId: "vendor-1", vendorName: "Vendor One", category: null, applicabilityType: null,
+};
 const candidate = proposeFitment(source, { Toyota: ["Camry"] });
 const fitment = candidate.proposal!;
 
 function fixture(options: { changed?: boolean; exists?: boolean; touched?: boolean } = {}) {
   const commands: string[] = [];
   let inserted: any = null;
+  let applicabilityType: string | null = null;
+  let partRevision = "100";
   const client = {
     query: async (sql: string, params?: unknown[]) => {
       commands.push(sql);
-      if (sql.startsWith("SELECT id, name")) return { rows: [{ ...source, ...(options.changed ? { description: "changed" } : {}) }] };
-      if (sql.startsWith("SELECT id FROM part_compatibilities")) return { rows: options.exists || inserted ? [{ id: "existing" }] : [] };
+      if (sql.includes("SELECT id, name, description")) return { rows: [{ ...source, applicabilityType, ...(options.changed ? { description: "changed" } : {}) }] };
+      if (sql.startsWith("SELECT applicability_type")) return { rows: [{ applicability_type: applicabilityType, revision: partRevision }] };
+      if (sql.startsWith("SELECT id FROM part_compatibilities")) return { rows: options.exists ? [{ id: "existing" }] : inserted ? [{ id: inserted.id }] : [] };
       if (sql.startsWith("INSERT")) {
         inserted = { id: params![0], part_id: source.id, ...fitment, created_at: "2026-09-07 12:00:00+00", revision: "123" };
         return { rows: [inserted] };
+      }
+      if (sql.startsWith("UPDATE parts SET applicability_type='vehicle'")) {
+        applicabilityType = "vehicle";
+        partRevision = "456";
+        return { rowCount: 1, rows: [{ revision: partRevision }] };
+      }
+      if (sql.startsWith("UPDATE parts SET applicability_type=NULL")) {
+        const matches = applicabilityType === "vehicle" && params![1] === partRevision;
+        if (matches) {
+          applicabilityType = null;
+          partRevision = "789";
+        }
+        return { rowCount: matches ? 1 : 0, rows: matches ? [{ id: source.id }] : [] };
       }
       if (sql.startsWith("DELETE")) {
         const matches = inserted && !options.touched && params![0] === inserted.id && params![7] === inserted.revision;
@@ -38,9 +57,10 @@ test("apply locks parent, journals before commit, and reruns skip", async () => 
     receipt = entry;
   }), "applied");
   assert.ok(f.commands.some((sql) => sql.includes("FOR UPDATE")));
-  assert.ok(receipt?.after.id.startsWith("fit_backfill_"));
-  assert.deepEqual(receipt?.before, []);
-  assert.equal(await applyCandidate(f.client, candidate, fitment, () => assert.fail()), "already-has-fitment");
+  assert.ok(receipt?.after.compatibility.id.startsWith("fit_backfill_"));
+  assert.deepEqual(receipt?.before, { compatibilities: [], applicabilityType: null });
+  assert.equal(receipt?.after.applicability.after, "vehicle");
+  assert.equal(await applyCandidate(f.client, candidate, fitment, () => assert.fail()), "already-classified");
 });
 test("source changes and existing fitment are skipped without insertion", async () => {
   for (const options of [{ changed: true }, { exists: true }]) {
@@ -76,5 +96,11 @@ test("rollback leaves a subsequently touched fitment unchanged", async () => {
 test("invalid and mismatched approved proposals never start transactions", async () => {
   const f = fixture();
   await assert.rejects(applyCandidate(f.client, candidate, { ...fitment, year: 2015 }, () => assert.fail()));
+  assert.equal(f.commands.length, 0);
+  const classified = {
+    ...candidate,
+    source: { ...candidate.source, applicabilityType: "specification" as const },
+  };
+  await assert.rejects(applyCandidate(f.client, classified, fitment, () => assert.fail()));
   assert.equal(f.commands.length, 0);
 });

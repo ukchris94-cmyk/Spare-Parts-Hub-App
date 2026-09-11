@@ -29,7 +29,16 @@ test("cannot clear previously completed fitment", () => {
   assert.equal(requiresFitmentRepair(details, {}, 1, 1), false);
 });
 const catalog = { Toyota: ["Camry", "Hilux"], Honda: ["Accord"] };
-const propose = (description: string) => proposeFitment({ id: "p1", name: "Sensor", description }, catalog);
+const source = (description: string, applicabilityType: "vehicle" | "specification" | "universal" | null = null) => ({
+  id: "p1",
+  name: "Sensor",
+  description,
+  userId: "vendor-1",
+  vendorName: "Vendor One",
+  category: null,
+  applicabilityType,
+});
+const propose = (description: string) => proposeFitment(source(description), catalog);
 test("standalone exact declarations propose evidence but require trim review", () => {
   const candidate = propose("Toyota Camry 2014\nPair\nFront");
   assert.equal(candidate.status, "candidate");
@@ -48,9 +57,30 @@ test("vague, conflicting, misleading, and missing details are skipped", () => {
   ]) assert.equal(propose(description).status, "skipped", description);
 });
 test("existing compatibility is never proposed for overwrite", () => {
-  assert.equal(proposeFitment({ id: "p", name: "Sensor", description: "Toyota Camry 2014" }, catalog, true).status, "already-complete");
+  assert.equal(proposeFitment({ ...source("Toyota Camry 2014"), id: "p" }, catalog, true).status, "already-complete");
+  assert.equal(proposeFitment(source("Toyota Camry 2014", "specification"), catalog).status, "already-complete");
+  assert.equal(proposeFitment(source("Toyota Camry 2014", "universal"), catalog).status, "already-complete");
+});
+test("explicit specification values are advisory only", () => {
+  const candidate = propose("Engine oil 5W-30, 4L");
+  assert.equal(candidate.status, "skipped");
+  assert.deepEqual(candidate.advisorySpecifications.map((item) => [item.key, item.value]), [
+    ["grade_viscosity", "5W-30"],
+    ["pack_size", "4L"],
+    ["product_type", "Engine oil"],
+  ]);
 });
 test("approval and audit schemas reject incomplete safety metadata", () => {
   assert.equal(approvalSchema.safeParse({ candidates: [{ id: "p1" }] }).success, false);
   assert.equal(reportSchema.safeParse({ entries: [propose("Toyota Camry 2014")] }).success, false);
+  const completeReport = {
+    version: 2,
+    database: "fingerprint",
+    generatedAt: new Date().toISOString(),
+    catalogSha256: "a".repeat(64),
+    counts: { candidate: 1, skipped: 0, alreadyComplete: 0 },
+    entries: [propose("Toyota Camry 2014")],
+  };
+  assert.equal(reportSchema.safeParse(completeReport).success, true);
+  assert.equal(reportSchema.safeParse({ ...completeReport, version: 1 }).success, false);
 });
