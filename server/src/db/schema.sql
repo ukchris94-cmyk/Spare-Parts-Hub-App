@@ -217,7 +217,13 @@ ALTER TABLE parts ADD COLUMN IF NOT EXISTS listing_status TEXT NOT NULL DEFAULT 
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS applicability_review_note TEXT;
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS applicability_reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS applicability_reviewed_at TIMESTAMPTZ;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS broad_compatibility_scope TEXT;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS broad_vehicle_makes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS broad_year_scope TEXT;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS broad_year_from INTEGER;
+ALTER TABLE parts ADD COLUMN IF NOT EXISTS broad_year_to INTEGER;
 CREATE INDEX IF NOT EXISTS idx_parts_user ON parts (user_id);
+CREATE INDEX IF NOT EXISTS idx_parts_broad_vehicle_makes ON parts USING GIN (broad_vehicle_makes);
 
 DO $$
 BEGIN

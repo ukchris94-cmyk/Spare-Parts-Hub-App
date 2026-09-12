@@ -5,9 +5,11 @@ import { authenticateRequest, requireAuthenticated, requireRoles } from "../midd
 import { createNotification } from "../services/notifications";
 import { FITMENT_REQUIRED, FitmentRequiredError, requiresFitmentRepair, normalizeCompatibilities } from "../services/partFitment";
 import {
+  normalizeBroadCompatibility,
   normalizeApplicabilityType,
   normalizePartMetadata,
   normalizeSpecifications,
+  type BroadCompatibility,
   validateApplicability,
 } from "../services/partApplicability";
 import {
@@ -24,6 +26,24 @@ function isPrivileged(req: Request): boolean {
 
 function genId(prefix: string): string {
   return `${prefix}_${randomUUID()}`;
+}
+
+type BroadCompatibilityColumns = {
+  broad_compatibility_scope: string | null;
+  broad_vehicle_makes: string[] | null;
+  broad_year_scope: string | null;
+  broad_year_from: number | null;
+  broad_year_to: number | null;
+};
+
+function broadCompatibilityFromRow(row: BroadCompatibilityColumns): BroadCompatibility | null {
+  return normalizeBroadCompatibility({
+    scope: row.broad_compatibility_scope,
+    vehicleMakes: row.broad_vehicle_makes || [],
+    yearScope: row.broad_year_scope,
+    yearFrom: row.broad_year_from,
+    yearTo: row.broad_year_to,
+  }).item;
 }
 
 function isDbColumnError(err: unknown): boolean {
@@ -277,6 +297,11 @@ router.get("/search", async (req: Request, res: Response) => {
       p.manufacturer_part_number,
       p.applicability_type,
       p.specifications,
+      p.broad_compatibility_scope,
+      p.broad_vehicle_makes,
+      p.broad_year_scope,
+      p.broad_year_from,
+      p.broad_year_to,
       p.listing_status,
       p.applicability_review_note,
       COALESCE(NULLIF(u.business_name, ''), NULLIF(u.first_name, ''), split_part(u.email, '@', 1)) AS vendor_name
@@ -294,6 +319,10 @@ router.get("/search", async (req: Request, res: Response) => {
       OR p.brand ILIKE $${i}
       OR p.manufacturer_part_number ILIKE $${i}
       OR p.specifications::text ILIKE $${i}
+      OR array_to_string(p.broad_vehicle_makes, ' ') ILIKE $${i}
+      OR replace(COALESCE(p.broad_compatibility_scope, ''), '_', ' ') ILIKE $${i}
+      OR replace(COALESCE(p.broad_year_scope, ''), '_', ' ') ILIKE $${i}
+      OR concat_ws(' ', p.broad_year_from, p.broad_year_to) ILIKE $${i}
       OR EXISTS (
         SELECT 1 FROM part_compatibilities pc
         WHERE pc.part_id = p.id
@@ -335,6 +364,11 @@ router.get("/search", async (req: Request, res: Response) => {
     manufacturer_part_number: string | null;
     applicability_type: string | null;
     specifications: unknown;
+    broad_compatibility_scope: string | null;
+    broad_vehicle_makes: string[] | null;
+    broad_year_scope: string | null;
+    broad_year_from: number | null;
+    broad_year_to: number | null;
     listing_status: string;
     applicability_review_note: string | null;
     vendor_name: string | null;
@@ -355,6 +389,11 @@ router.get("/search", async (req: Request, res: Response) => {
       manufacturer_part_number: string | null;
       applicability_type: string | null;
       specifications: unknown;
+      broad_compatibility_scope: string | null;
+      broad_vehicle_makes: string[] | null;
+      broad_year_scope: string | null;
+      broad_year_from: number | null;
+      broad_year_to: number | null;
       listing_status: string;
       applicability_review_note: string | null;
       vendor_name: string | null;
@@ -389,6 +428,11 @@ router.get("/search", async (req: Request, res: Response) => {
       manufacturer_part_number: null,
       applicability_type: null,
       specifications: [],
+      broad_compatibility_scope: null,
+      broad_vehicle_makes: [],
+      broad_year_scope: null,
+      broad_year_from: null,
+      broad_year_to: null,
       listing_status: "published",
       applicability_review_note: null,
     }));
@@ -422,6 +466,7 @@ router.get("/search", async (req: Request, res: Response) => {
         manufacturerPartNumber: row.manufacturer_part_number,
         applicabilityType: row.applicability_type,
         specifications: Array.isArray(row.specifications) ? row.specifications : [],
+        broadCompatibility: broadCompatibilityFromRow(row),
         listingStatus: row.listing_status,
         applicabilityReviewNote: wantsPending || row.applicability_type === "universal"
           ? row.applicability_review_note
@@ -485,7 +530,7 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
   const log = req.log;
   const { userId, name, description, imageUrl, role, priceNgn, stockQty, quality, compatibilities,
     category, brand, manufacturerPartNumber, applicabilityType, specifications,
-    applicabilityReviewNote, universalConfirmed } = req.body as {
+    applicabilityReviewNote, universalConfirmed, broadCompatibility } = req.body as {
     userId?: string;
     name?: string;
     description?: string;
@@ -502,6 +547,7 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
     specifications?: unknown;
     applicabilityReviewNote?: unknown;
     universalConfirmed?: boolean;
+    broadCompatibility?: unknown;
   };
 
   const normalizedName = typeof name === "string" ? name.trim() : "";
@@ -518,6 +564,7 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
   const normalizedQuality = normalizeQuality(quality);
   const normalizedCompatibilities = normalizeCompatibilities(compatibilities);
   const normalizedSpecifications = normalizeSpecifications(specifications);
+  const normalizedBroadCompatibility = normalizeBroadCompatibility(broadCompatibility);
   const metadata = normalizePartMetadata({ category, brand, manufacturerPartNumber, applicabilityReviewNote });
   const applicabilityProvided = Object.prototype.hasOwnProperty.call(req.body, "applicabilityType");
   const normalizedApplicability = normalizeApplicabilityType(applicabilityType)
@@ -546,6 +593,12 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
   if (normalizedSpecifications.error) {
     return res.status(400).json({ ok: false, message: normalizedSpecifications.error });
   }
+  if (normalizedBroadCompatibility.error) {
+    log.warn({ code: "BROAD_COMPATIBILITY_INVALID", fields: Object.keys(req.body || {}).sort() },
+      "Part create applicability validation failed");
+    return res.status(422).json({ ok: false, code: "BROAD_COMPATIBILITY_INVALID", message: normalizedBroadCompatibility.error,
+      fieldErrors: { broadCompatibility: normalizedBroadCompatibility.error } });
+  }
 
   const applicability = validateApplicability({
     applicabilityType: normalizedApplicability,
@@ -556,9 +609,13 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
     privileged: isPrivileged(req),
     reviewNote: metadata.applicabilityReviewNote,
     universalConfirmed: universalConfirmed === true,
+    broadCompatibility: normalizedApplicability === "universal" ? normalizedBroadCompatibility.item : null,
   });
   if (applicability.error) {
-    return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: applicability.error });
+    log.warn({ code: "APPLICABILITY_REQUIRED", applicabilityType: normalizedApplicability,
+      fields: Object.keys(req.body || {}).sort() }, "Part create applicability validation failed");
+    return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: applicability.error,
+      fieldErrors: { applicability: applicability.error } });
   }
 
   const id = genId("part");
@@ -570,8 +627,9 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
           `INSERT INTO parts (
              id, name, description, image_url, user_id, price_ngn, stock_qty, quality, role,
              category, brand, manufacturer_part_number, applicability_type, specifications,
-             listing_status, applicability_review_note, applicability_reviewed_by, applicability_reviewed_at
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18)`,
+             listing_status, applicability_review_note, applicability_reviewed_by, applicability_reviewed_at,
+             broad_compatibility_scope, broad_vehicle_makes, broad_year_scope, broad_year_from, broad_year_to
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
           [
             id,
             normalizedName,
@@ -591,6 +649,11 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
             metadata.applicabilityReviewNote,
             applicability.status === "published" && normalizedApplicability !== "vehicle" ? req.user?.id : null,
             applicability.status === "published" && normalizedApplicability !== "vehicle" ? new Date() : null,
+            normalizedApplicability === "universal" ? normalizedBroadCompatibility.item?.scope : null,
+            normalizedApplicability === "universal" ? normalizedBroadCompatibility.item?.vehicleMakes || [] : [],
+            normalizedApplicability === "universal" ? normalizedBroadCompatibility.item?.yearScope : null,
+            normalizedApplicability === "universal" ? normalizedBroadCompatibility.item?.yearFrom : null,
+            normalizedApplicability === "universal" ? normalizedBroadCompatibility.item?.yearTo : null,
           ],
         );
         for (const compatibility of normalizedCompatibilities.items) {
@@ -642,6 +705,7 @@ router.post("/", requireRoles("vendor", "admin", "staff"), async (req: Request, 
       manufacturerPartNumber: metadata.manufacturerPartNumber,
       applicabilityType: normalizedApplicability,
       specifications: normalizedSpecifications.items,
+      broadCompatibility: normalizedApplicability === "universal" ? normalizedBroadCompatibility.item : null,
       listingStatus: applicability.status,
       applicabilityReviewNote: metadata.applicabilityReviewNote,
       role: normalizedRole,
@@ -677,6 +741,7 @@ router.patch("/:partId/applicability-review", requireRoles("admin", "staff"), as
 
   const normalizedCompatibilities = normalizeCompatibilities(req.body?.compatibilities);
   const normalizedSpecifications = normalizeSpecifications(req.body?.specifications);
+  const normalizedBroadCompatibility = normalizeBroadCompatibility(req.body?.broadCompatibility);
   const metadata = normalizePartMetadata({
     category: req.body?.category,
     brand: req.body?.brand,
@@ -684,14 +749,15 @@ router.patch("/:partId/applicability-review", requireRoles("admin", "staff"), as
     applicabilityReviewNote: note,
   });
   const applicabilityType = normalizeApplicabilityType(req.body?.applicabilityType);
-  if (normalizedCompatibilities.error || normalizedSpecifications.error) {
-    const message = normalizedCompatibilities.error || normalizedSpecifications.error || "Invalid applicability data.";
+  if (normalizedCompatibilities.error || normalizedSpecifications.error || normalizedBroadCompatibility.error) {
+    const message = normalizedCompatibilities.error || normalizedSpecifications.error || normalizedBroadCompatibility.error || "Invalid applicability data.";
     req.log.warn({
       partId,
       code: "APPLICABILITY_INVALID",
       fields: Object.keys(req.body || {}).sort(),
     }, "Applicability review validation failed");
-    return res.status(422).json({ ok: false, code: "APPLICABILITY_INVALID", message });
+    return res.status(422).json({ ok: false, code: "APPLICABILITY_INVALID", message,
+      fieldErrors: normalizedBroadCompatibility.error ? { broadCompatibility: normalizedBroadCompatibility.error } : undefined });
   }
 
   type ReviewFailure = {
@@ -719,10 +785,11 @@ router.patch("/:partId/applicability-review", requireRoles("admin", "staff"), as
         applicability_type: string | null;
         specifications: unknown;
         applicability_review_note: string | null;
-      }>(
+      } & BroadCompatibilityColumns>(
         `SELECT id, name, description, image_url, price_ngn, stock_qty, quality, role,
            category, brand, manufacturer_part_number, applicability_type, specifications,
-           applicability_review_note
+           applicability_review_note, broad_compatibility_scope, broad_vehicle_makes,
+           broad_year_scope, broad_year_from, broad_year_to
          FROM parts WHERE id=$1 FOR UPDATE`,
         [partId],
       );
@@ -762,6 +829,10 @@ router.patch("/:partId/applicability-review", requireRoles("admin", "staff"), as
       const finalCompatibilities = bodyHas("compatibilities")
         ? normalizedCompatibilities.items
         : existingCompatibilities.rows;
+      const currentBroadCompatibility = broadCompatibilityFromRow(current);
+      const finalBroadCompatibility = finalType === "universal"
+        ? bodyHas("broadCompatibility") ? normalizedBroadCompatibility.item : currentBroadCompatibility
+        : null;
       const fieldErrors: Record<string, string> = {};
       if (!finalName) fieldErrors.name = "Part name is required.";
       if (!finalCategory) fieldErrors.category = "Choose a product category.";
@@ -778,6 +849,7 @@ router.patch("/:partId/applicability-review", requireRoles("admin", "staff"), as
         privileged: true,
         reviewNote: note,
         universalConfirmed: req.body?.universalConfirmed === true,
+        broadCompatibility: finalBroadCompatibility,
       });
       if (applicabilityValidation.error) fieldErrors.applicability = applicabilityValidation.error;
       if (Object.keys(fieldErrors).length) {
@@ -804,18 +876,23 @@ router.patch("/:partId/applicability-review", requireRoles("admin", "staff"), as
         specifications: unknown;
         listing_status: string;
         applicability_review_note: string | null;
-      }>(
+      } & BroadCompatibilityColumns>(
         `UPDATE parts SET name=$1, description=$2, price_ngn=$3, stock_qty=$4, quality=$5,
            category=$6, brand=$7, manufacturer_part_number=$8, applicability_type=$9,
            specifications=$10::jsonb, listing_status='published', applicability_review_note=$11,
-           applicability_reviewed_by=$12, applicability_reviewed_at=NOW()
-         WHERE id=$13
+           applicability_reviewed_by=$12, applicability_reviewed_at=NOW(),
+           broad_compatibility_scope=$13, broad_vehicle_makes=$14, broad_year_scope=$15,
+           broad_year_from=$16, broad_year_to=$17
+         WHERE id=$18
          RETURNING id, name, description, image_url, price_ngn, stock_qty, quality, role,
            category, brand, manufacturer_part_number, applicability_type, specifications,
-           listing_status, applicability_review_note`,
+           listing_status, applicability_review_note, broad_compatibility_scope,
+           broad_vehicle_makes, broad_year_scope, broad_year_from, broad_year_to`,
         [finalName, finalDescription, finalPrice, finalStock, finalQuality, finalCategory,
           finalBrand, finalPartNumber, finalType, JSON.stringify(storedSpecifications),
-          storedReviewNote, req.user?.id, partId],
+          storedReviewNote, req.user?.id, finalBroadCompatibility?.scope || null,
+          finalBroadCompatibility?.vehicleMakes || [], finalBroadCompatibility?.yearScope || null,
+          finalBroadCompatibility?.yearFrom || null, finalBroadCompatibility?.yearTo || null, partId],
       );
 
       await client.query("DELETE FROM part_compatibilities WHERE part_id=$1", [partId]);
@@ -838,6 +915,7 @@ router.patch("/:partId/applicability-review", requireRoles("admin", "staff"), as
           manufacturerPartNumber: row.manufacturer_part_number,
           applicabilityType: row.applicability_type,
           specifications: Array.isArray(row.specifications) ? row.specifications : [],
+          broadCompatibility: broadCompatibilityFromRow(row),
           listingStatus: row.listing_status,
           applicabilityReviewNote: row.applicability_review_note,
           compatibilities: finalType === "vehicle" ? finalCompatibilities : [],
@@ -977,7 +1055,7 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
   const log = req.log;
   const { name, description, imageUrl, priceNgn, stockQty, quality, compatibilities,
     category, brand, manufacturerPartNumber, applicabilityType, specifications,
-    applicabilityReviewNote, universalConfirmed } = req.body as {
+    applicabilityReviewNote, universalConfirmed, broadCompatibility } = req.body as {
     name?: string;
     description?: string;
     imageUrl?: string;
@@ -992,6 +1070,7 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
     specifications?: unknown;
     applicabilityReviewNote?: unknown;
     universalConfirmed?: boolean;
+    broadCompatibility?: unknown;
   };
 
   const normalizedName = typeof name === "string" ? name.trim() : undefined;
@@ -1006,7 +1085,9 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
   const normalizedCompatibilities = normalizeCompatibilities(compatibilities);
   const hasSpecifications = Object.prototype.hasOwnProperty.call(req.body, "specifications");
   const hasApplicability = Object.prototype.hasOwnProperty.call(req.body, "applicabilityType");
+  const hasBroadCompatibility = Object.prototype.hasOwnProperty.call(req.body, "broadCompatibility");
   const normalizedSpecifications = normalizeSpecifications(specifications);
+  const normalizedBroadCompatibility = normalizeBroadCompatibility(broadCompatibility);
   const metadata = normalizePartMetadata({ category, brand, manufacturerPartNumber, applicabilityReviewNote });
 
   const ownerResult = await query<{ user_id: string | null }>(
@@ -1034,6 +1115,12 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
   }
   if (hasSpecifications && normalizedSpecifications.error) {
     return res.status(400).json({ ok: false, message: normalizedSpecifications.error });
+  }
+  if (hasBroadCompatibility && normalizedBroadCompatibility.error) {
+    log.warn({ partId, code: "BROAD_COMPATIBILITY_INVALID", fields: Object.keys(req.body || {}).sort() },
+      "Part update applicability validation failed");
+    return res.status(422).json({ ok: false, code: "BROAD_COMPATIBILITY_INVALID", message: normalizedBroadCompatibility.error,
+      fieldErrors: { broadCompatibility: normalizedBroadCompatibility.error } });
   }
 
   const fields: string[] = [];
@@ -1073,6 +1160,17 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
   if (hasApplicability) { fields.push(`applicability_type = $${index++}`); values.push(normalizeApplicabilityType(applicabilityType)); }
   if (hasSpecifications) { fields.push(`specifications = $${index++}::jsonb`); values.push(JSON.stringify(normalizedSpecifications.items)); }
   if (applicabilityReviewNote !== undefined) { fields.push(`applicability_review_note = $${index++}`); values.push(metadata.applicabilityReviewNote); }
+  const requestedApplicability = hasApplicability ? normalizeApplicabilityType(applicabilityType) : null;
+  if (hasBroadCompatibility || (hasApplicability && requestedApplicability !== "universal")) {
+    const broad = requestedApplicability === "universal" || !hasApplicability
+      ? normalizedBroadCompatibility.item
+      : null;
+    fields.push(`broad_compatibility_scope = $${index++}`); values.push(broad?.scope || null);
+    fields.push(`broad_vehicle_makes = $${index++}`); values.push(broad?.vehicleMakes || []);
+    fields.push(`broad_year_scope = $${index++}`); values.push(broad?.yearScope || null);
+    fields.push(`broad_year_from = $${index++}`); values.push(broad?.yearFrom || null);
+    fields.push(`broad_year_to = $${index++}`); values.push(broad?.yearTo || null);
+  }
 
   if (!fields.length && !hasCompatibilities) {
     return res.status(400).json({ ok: false, message: "No fields to update" });
@@ -1088,8 +1186,9 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
           category: string | null; brand: string | null; manufacturer_part_number: string | null;
           applicability_type: string | null; specifications: unknown; listing_status: string;
           applicability_review_note: string | null;
-        }>(`SELECT name, description, image_url, quality, category, brand, manufacturer_part_number, applicability_type,
-                   specifications, listing_status, applicability_review_note
+        } & BroadCompatibilityColumns>(`SELECT name, description, image_url, quality, category, brand, manufacturer_part_number, applicability_type,
+                   specifications, listing_status, applicability_review_note, broad_compatibility_scope,
+                   broad_vehicle_makes, broad_year_scope, broad_year_from, broad_year_to
             FROM parts WHERE id = $1 FOR UPDATE`, [partId]);
         if (!locked.rows[0]) {
           await client.query("ROLLBACK");
@@ -1107,6 +1206,15 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
         const resultingType = hasApplicability
           ? normalizeApplicabilityType(applicabilityType)
           : normalizeApplicabilityType(locked.rows[0].applicability_type) || (resultingCount > 0 ? "vehicle" : null);
+        const currentBroadCompatibility = broadCompatibilityFromRow(locked.rows[0]);
+        const resultingBroadCompatibility = resultingType === "universal"
+          ? hasBroadCompatibility ? normalizedBroadCompatibility.item : currentBroadCompatibility
+          : null;
+        if (resultingType !== "universal" && hasBroadCompatibility && normalizedBroadCompatibility.item) {
+          const error = new Error("Broad compatibility can only be used with Broad compatibility mode");
+          error.name = "ApplicabilityRequiredError";
+          throw error;
+        }
         const resultingCategory = category !== undefined ? metadata.category : locked.rows[0].category;
         const compatibilityKeys = (items: Array<{ make: string; model: string; year: number; trim?: string | null }>) =>
           items.map((item) => `${item.make.toLowerCase()}|${item.model.toLowerCase()}|${item.year}|${(item.trim || "").toLowerCase()}`).sort();
@@ -1119,6 +1227,7 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
           || (manufacturerPartNumber !== undefined && metadata.manufacturerPartNumber !== locked.rows[0].manufacturer_part_number)
           || (hasApplicability && normalizeApplicabilityType(applicabilityType) !== normalizeApplicabilityType(locked.rows[0].applicability_type))
           || (hasSpecifications && JSON.stringify(normalizedSpecifications.items) !== JSON.stringify(currentSpecifications))
+          || (hasBroadCompatibility && JSON.stringify(normalizedBroadCompatibility.item) !== JSON.stringify(currentBroadCompatibility))
           || (hasCompatibilities && JSON.stringify(compatibilityKeys(normalizedCompatibilities.items)) !== JSON.stringify(compatibilityKeys(existing.rows)));
         const detailChanges = {
           ...(normalizedName !== undefined ? { name: normalizedName } : {}),
@@ -1138,6 +1247,7 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
           privileged: isPrivileged(req),
           reviewNote: applicabilityReviewNote !== undefined ? metadata.applicabilityReviewNote : locked.rows[0].applicability_review_note,
           universalConfirmed: universalConfirmed === true || (!criticalApplicabilityChange && resultingType === "universal"),
+          broadCompatibility: resultingBroadCompatibility,
           existing: true,
         });
         if (applicabilityValidation.error) {
@@ -1160,7 +1270,7 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
           role: string | null; category: string | null; brand: string | null;
           manufacturer_part_number: string | null; applicability_type: string | null;
           specifications: unknown; listing_status: string; applicability_review_note: string | null;
-        } | undefined;
+        } & BroadCompatibilityColumns | undefined;
 
         if (fields.length > 0) {
           const updateValues = [...values, partId];
@@ -1175,13 +1285,14 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
             role: string | null; category: string | null; brand: string | null;
             manufacturer_part_number: string | null; applicability_type: string | null;
             specifications: unknown; listing_status: string; applicability_review_note: string | null;
-          }>(
+          } & BroadCompatibilityColumns>(
             `UPDATE parts
              SET ${fields.join(", ")}
              WHERE id = $${index}
              RETURNING id, name, description, image_url, price_ngn, stock_qty, quality, role,
                category, brand, manufacturer_part_number, applicability_type, specifications,
-               listing_status, applicability_review_note`,
+               listing_status, applicability_review_note, broad_compatibility_scope,
+               broad_vehicle_makes, broad_year_scope, broad_year_from, broad_year_to`,
             updateValues,
           );
           row = result.rows[0];
@@ -1197,10 +1308,11 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
             role: string | null; category: string | null; brand: string | null;
             manufacturer_part_number: string | null; applicability_type: string | null;
             specifications: unknown; listing_status: string; applicability_review_note: string | null;
-          }>(
+          } & BroadCompatibilityColumns>(
             `SELECT id, name, description, image_url, price_ngn, stock_qty, quality, role,
                category, brand, manufacturer_part_number, applicability_type, specifications,
-               listing_status, applicability_review_note
+               listing_status, applicability_review_note, broad_compatibility_scope,
+               broad_vehicle_makes, broad_year_scope, broad_year_from, broad_year_to
              FROM parts WHERE id = $1`,
             [partId],
           );
@@ -1273,6 +1385,7 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
         manufacturerPartNumber: part.manufacturer_part_number,
         applicabilityType: part.applicability_type,
         specifications: Array.isArray(part.specifications) ? part.specifications : [],
+        broadCompatibility: broadCompatibilityFromRow(part),
         listingStatus: part.listing_status,
         applicabilityReviewNote: part.applicability_review_note,
         compatibilities: currentCompatibilities,
@@ -1283,7 +1396,10 @@ router.patch("/:partId", requireAuthenticated, async (req: Request, res: Respons
       return res.status(422).json({ ok: false, code: "FITMENT_REQUIRED", message: err.message });
     }
     if (err instanceof Error && err.name === "ApplicabilityRequiredError") {
-      return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: err.message });
+      log.warn({ partId, code: "APPLICABILITY_REQUIRED", fields: Object.keys(req.body || {}).sort() },
+        "Part update applicability validation failed");
+      return res.status(422).json({ ok: false, code: "APPLICABILITY_REQUIRED", message: err.message,
+        fieldErrors: { applicability: err.message } });
     }
     log.error({ err, partId }, "Part update failed");
     throw err;
@@ -2089,6 +2205,11 @@ router.get("/:partId", async (req: Request, res: Response) => {
     specifications: unknown;
     listing_status: string;
     applicability_review_note: string | null;
+    broad_compatibility_scope: string | null;
+    broad_vehicle_makes: string[] | null;
+    broad_year_scope: string | null;
+    broad_year_from: number | null;
+    broad_year_to: number | null;
     created_at: string;
   }> = [];
   try {
@@ -2110,6 +2231,11 @@ router.get("/:partId", async (req: Request, res: Response) => {
       specifications: unknown;
       listing_status: string;
       applicability_review_note: string | null;
+      broad_compatibility_scope: string | null;
+      broad_vehicle_makes: string[] | null;
+      broad_year_scope: string | null;
+      broad_year_from: number | null;
+      broad_year_to: number | null;
       created_at: string;
     }>(
       `SELECT
@@ -2133,6 +2259,11 @@ router.get("/:partId", async (req: Request, res: Response) => {
          p.specifications,
          p.listing_status,
          p.applicability_review_note,
+         p.broad_compatibility_scope,
+         p.broad_vehicle_makes,
+         p.broad_year_scope,
+         p.broad_year_from,
+         p.broad_year_to,
          p.created_at
        FROM parts p
        LEFT JOIN users u ON u.id = p.user_id
@@ -2179,6 +2310,11 @@ router.get("/:partId", async (req: Request, res: Response) => {
       specifications: [],
       listing_status: "published",
       applicability_review_note: null,
+      broad_compatibility_scope: null,
+      broad_vehicle_makes: [],
+      broad_year_scope: null,
+      broad_year_from: null,
+      broad_year_to: null,
     }));
   }
 
@@ -2211,6 +2347,7 @@ router.get("/:partId", async (req: Request, res: Response) => {
       manufacturerPartNumber: part.manufacturer_part_number,
       applicabilityType: part.applicability_type,
       specifications: Array.isArray(part.specifications) ? part.specifications : [],
+      broadCompatibility: broadCompatibilityFromRow(part),
       listingStatus: part.listing_status,
       applicabilityReviewNote: part.listing_status === "pending_review" || part.applicability_type === "universal"
         ? part.applicability_review_note

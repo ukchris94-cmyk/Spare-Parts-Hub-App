@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeSpecifications, validateApplicability } from "./partApplicability";
+import { normalizeBroadCompatibility, normalizeSpecifications, validateApplicability } from "./partApplicability";
 
 const spec = (key: string, value = "value") => ({ key, label: key, value });
 
@@ -23,7 +23,28 @@ test("category specifications are required and vendor submissions wait for revie
 });
 
 test("universal products require staff publication", () => {
-  assert.equal(validateApplicability({ applicabilityType: "universal", applicabilityProvided: true, category: "Other", specifications: [], compatibilityCount: 0, privileged: false }).status, "pending_review");
+  const broad = normalizeBroadCompatibility({
+    scope: "selected_makes", vehicleMakes: ["Toyota", "toyota", "Acura"],
+    yearScope: "year_range", yearFrom: 2005, yearTo: 2015,
+  }).item;
+  assert.deepEqual(broad?.vehicleMakes, ["Toyota", "Acura"]);
+  assert.ok(validateApplicability({ applicabilityType: "universal", applicabilityProvided: true, category: "Other", specifications: [], compatibilityCount: 0, privileged: false, broadCompatibility: broad }).error);
+  assert.equal(validateApplicability({ applicabilityType: "universal", applicabilityProvided: true, category: "Other", specifications: [], compatibilityCount: 0, privileged: false, reviewNote: "Fits these makes without model-specific fitment", broadCompatibility: broad }).status, "pending_review");
   assert.ok(validateApplicability({ applicabilityType: "universal", applicabilityProvided: true, category: "Other", specifications: [], compatibilityCount: 0, privileged: true }).error);
-  assert.equal(validateApplicability({ applicabilityType: "universal", applicabilityProvided: true, category: "Other", specifications: [], compatibilityCount: 0, privileged: true, universalConfirmed: true, reviewNote: "No vehicle-specific fitment" }).status, "published");
+  assert.equal(validateApplicability({ applicabilityType: "universal", applicabilityProvided: true, category: "Other", specifications: [], compatibilityCount: 0, privileged: true, universalConfirmed: true, reviewNote: "No model-specific fitment", broadCompatibility: broad }).status, "published");
+});
+
+test("broad compatibility validates all-make and year-range invariants", () => {
+  assert.deepEqual(normalizeBroadCompatibility({
+    scope: "all_makes", vehicleMakes: [], yearScope: "all_years", yearFrom: null, yearTo: null,
+  }).item?.scope, "all_makes");
+  assert.ok(normalizeBroadCompatibility({
+    scope: "all_makes", vehicleMakes: ["Toyota"], yearScope: "all_years", yearFrom: null, yearTo: null,
+  }).error);
+  assert.ok(normalizeBroadCompatibility({
+    scope: "selected_makes", vehicleMakes: ["Toyota"], yearScope: "year_range", yearFrom: 2020, yearTo: 2010,
+  }).error);
+  assert.ok(normalizeBroadCompatibility({
+    scope: "selected_makes", vehicleMakes: ["Not A Make"], yearScope: "all_years", yearFrom: null, yearTo: null,
+  }).error);
 });
