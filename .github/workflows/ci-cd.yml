@@ -7,6 +7,7 @@ on:
 
 env:
   SERVER_USER: ubuntu
+  SERVER_HOST: backend.quickserve.com.ng
   APP_DIR: /opt/spare-parts-hub
 
 jobs:
@@ -33,11 +34,26 @@ jobs:
 
       # ---------- PREP DEPLOY ----------
       - name: Setup SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
         run: |
+          set -euo pipefail
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "AWS_SSH_PRIVATE_KEY is empty." >&2
+            exit 1
+          fi
           mkdir -p ~/.ssh
-          echo "${{ secrets.AWS_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          if ! ssh-keygen -y -f ~/.ssh/id_rsa >/dev/null; then
+            echo "AWS_SSH_PRIVATE_KEY is not a valid private key." >&2
+            exit 1
+          fi
+          if ! ssh-keyscan -T 10 -H "$SERVER_HOST" >> ~/.ssh/known_hosts; then
+            echo "Cannot reach $SERVER_HOST on SSH port 22." >&2
+            exit 1
+          fi
+          ssh -i ~/.ssh/id_rsa -o BatchMode=yes -o ConnectTimeout=10 "$SERVER_USER@$SERVER_HOST" true
 
       # ---------- DEPLOY DIST ----------
       - name: Upload compiled files
@@ -45,16 +61,16 @@ jobs:
           rsync -avz \
             --delete \
             server/dist/ \
-            $SERVER_USER@${{ secrets.SERVER_IP }}:$APP_DIR/server/dist/
+            $SERVER_USER@$SERVER_HOST:$APP_DIR/server/dist/
           rsync -avz \
             server/package.json \
             server/package-lock.json \
-            $SERVER_USER@${{ secrets.SERVER_IP }}:$APP_DIR/server/
+            $SERVER_USER@$SERVER_HOST:$APP_DIR/server/
 
       # ---------- INSTALL PROD DEPS ----------
       - name: Install production dependencies on server
         run: |
-          ssh $SERVER_USER@${{ secrets.SERVER_IP }} << EOF
+          ssh "$SERVER_USER@$SERVER_HOST" << EOF
             cd $APP_DIR/server
             if [ -d node_modules ]; then
               sudo chown -R $SERVER_USER:$SERVER_USER node_modules
@@ -65,7 +81,7 @@ jobs:
       # ---------- RESTART PM2 ----------
       - name: Restart PM2
         run: |
-          ssh $SERVER_USER@${{ secrets.SERVER_IP }} << EOF
+          ssh "$SERVER_USER@$SERVER_HOST" << EOF
             NODE_ENV=production pm2 restart spare-parts-hub --update-env
             pm2 save
           EOF
