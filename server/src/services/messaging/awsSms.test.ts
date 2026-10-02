@@ -30,3 +30,29 @@ test("sends a transactional OTP through AWS without exposing it outside the mess
   assert.equal(input?.TimeToLive, 300);
   assert.match(String(input?.MessageBody), /123456/);
 });
+
+test("AWS rejection does not report an accepted OTP", async () => {
+  const client = {
+    send: async () => { throw new Error("Sender rejected"); },
+  } as unknown as PinpointSMSVoiceV2Client;
+  const { AwsSmsProvider } = await import("./awsSms");
+  await assert.rejects(new AwsSmsProvider(client).sendOtp({
+    phoneE164: "+2348012345678",
+    code: "123456",
+    channel: "sms",
+    purpose: "signup",
+  }), /Sender rejected/);
+});
+
+test("an AWS response without a message ID is treated as a send failure", async () => {
+  const client = {
+    send: async () => ({}),
+  } as unknown as PinpointSMSVoiceV2Client;
+  const { AwsSmsProvider, MessagingDeliveryError } = await import("./awsSms");
+  await assert.rejects(new AwsSmsProvider(client).sendOtp({
+    phoneE164: "+2348012345678",
+    code: "123456",
+    channel: "sms",
+    purpose: "signup",
+  }), MessagingDeliveryError);
+});

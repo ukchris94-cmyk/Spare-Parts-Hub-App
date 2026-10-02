@@ -17,6 +17,7 @@ import {
   publicPartImageUrl,
   sendPartImage,
 } from "../utils/partImages";
+import { partSearchTerms } from "../services/partSearch";
 
 const router = Router();
 
@@ -249,12 +250,26 @@ async function loadBargainMessages(offerId: string) {
 }
 
 router.get("/search", async (req: Request, res: Response) => {
-  const { query: q, role, category, userId, includePending, page: rawPage, pageSize: rawPageSize } = req.query as {
+  const {
+    query: q,
+    role,
+    category,
+    userId,
+    includePending,
+    vehicleMake,
+    vehicleModel,
+    vehicleYear,
+    page: rawPage,
+    pageSize: rawPageSize,
+  } = req.query as {
     query?: string;
     role?: string;
     category?: string;
     userId?: string;
     includePending?: string;
+    vehicleMake?: string;
+    vehicleModel?: string;
+    vehicleYear?: string;
     page?: string;
     pageSize?: string;
   };
@@ -264,6 +279,21 @@ router.get("/search", async (req: Request, res: Response) => {
   const userIdFilter = typeof userId === "string" ? userId.trim() : null;
   const categoryFilter =
     typeof category === "string" ? category.trim().toLowerCase() : "";
+  const vehicleMakeFilter = typeof vehicleMake === "string" ? vehicleMake.trim().slice(0, 80) : "";
+  const vehicleModelFilter = typeof vehicleModel === "string" ? vehicleModel.trim().slice(0, 100) : "";
+  const vehicleYearFilter = typeof vehicleYear === "string" && /^\d{4}$/.test(vehicleYear.trim())
+    ? Number(vehicleYear.trim())
+    : null;
+  if (vehicleYear !== undefined && (
+    vehicleYearFilter === null
+    || vehicleYearFilter < 1980
+    || vehicleYearFilter > new Date().getFullYear() + 1
+  )) {
+    return res.status(400).json({ ok: false, message: "vehicleYear must be a valid four-digit year" });
+  }
+  if ((vehicleModelFilter || vehicleYearFilter !== null) && !vehicleMakeFilter) {
+    return res.status(400).json({ ok: false, message: "vehicleMake is required with vehicleModel or vehicleYear" });
+  }
   const wantsPending = includePending === "true";
   if (wantsPending) {
     const user = await authenticateRequest(req);
@@ -310,8 +340,8 @@ router.get("/search", async (req: Request, res: Response) => {
      WHERE ${wantsPending ? "1=1" : "p.listing_status = 'published'"}`;
   const params: unknown[] = [];
   let i = 1;
-  if (search) {
-    params.push(`%${search}%`);
+  for (const term of partSearchTerms(search)) {
+    params.push(`%${term}%`);
     sql += ` AND (
       p.name ILIKE $${i}
       OR p.description ILIKE $${i}
@@ -330,6 +360,55 @@ router.get("/search", async (req: Request, res: Response) => {
       )
     )`;
     i++;
+  }
+  if (vehicleMakeFilter) {
+    params.push(vehicleMakeFilter);
+    const makeIndex = i++;
+    let exactVehicleConditions = `lower(pc.make) = lower($${makeIndex})`;
+    if (vehicleModelFilter) {
+      params.push(vehicleModelFilter);
+      exactVehicleConditions += ` AND lower(pc.model) = lower($${i})`;
+      i++;
+    }
+    let broadYearCondition = "";
+    if (vehicleYearFilter !== null) {
+      params.push(vehicleYearFilter);
+      exactVehicleConditions += ` AND pc.year = $${i}`;
+      broadYearCondition = ` AND (
+        p.broad_year_scope = 'all_years'
+        OR (
+          p.broad_year_scope = 'year_range'
+          AND $${i} BETWEEN p.broad_year_from AND p.broad_year_to
+        )
+      )`;
+      i++;
+    }
+    sql += ` AND (
+      (
+        p.applicability_type = 'vehicle'
+        AND EXISTS (
+          SELECT 1
+          FROM part_compatibilities pc
+          WHERE pc.part_id = p.id
+            AND ${exactVehicleConditions}
+        )
+      )
+      OR (
+        p.applicability_type = 'universal'
+        AND (
+          p.broad_compatibility_scope = 'all_makes'
+          OR (
+            p.broad_compatibility_scope = 'selected_makes'
+            AND EXISTS (
+              SELECT 1
+              FROM unnest(COALESCE(p.broad_vehicle_makes, ARRAY[]::text[])) AS compatible_make
+              WHERE lower(compatible_make) = lower($${makeIndex})
+            )
+          )
+        )
+        ${broadYearCondition}
+      )
+    )`;
   }
   if (roleFilter) {
     params.push(roleFilter);
@@ -447,6 +526,9 @@ router.get("/search", async (req: Request, res: Response) => {
   );
   return res.json({
     query: search,
+    vehicleMake: vehicleMakeFilter || undefined,
+    vehicleModel: vehicleModelFilter || undefined,
+    vehicleYear: vehicleYearFilter ?? undefined,
     role: roleFilter ?? undefined,
     userId: userIdFilter ?? undefined,
     category: categoryFilter || undefined,
