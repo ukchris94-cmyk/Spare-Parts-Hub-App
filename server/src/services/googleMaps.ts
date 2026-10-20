@@ -51,6 +51,10 @@ type GoogleErrorBody = {
   };
 };
 
+type GeocodeResponse = {
+  status?: string;
+};
+
 export class GoogleMapsServiceError extends Error {
   constructor(
     message: string,
@@ -107,6 +111,13 @@ async function googleFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as GoogleErrorBody | null;
       const providerMessage = payload?.error?.message;
+      if (response.status === 403) {
+        throw new GoogleMapsServiceError(
+          "Maps service configuration needs attention. Please contact support.",
+          503,
+          "GOOGLE_MAPS_CONFIGURATION_ERROR"
+        );
+      }
       throw new GoogleMapsServiceError(
         providerMessage || "Google Maps request failed",
         response.status === 429 ? 429 : 502,
@@ -127,6 +138,25 @@ async function googleFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export function assertGeocodeStatus(payload: GeocodeResponse): void {
+  if (payload.status === "OK" || payload.status === "ZERO_RESULTS") return;
+  if (payload.status === "REQUEST_DENIED" || payload.status === "OVER_DAILY_LIMIT") {
+    throw new GoogleMapsServiceError(
+      "Maps service configuration needs attention. Please contact support.",
+      503,
+      "GOOGLE_MAPS_CONFIGURATION_ERROR"
+    );
+  }
+  if (payload.status === "OVER_QUERY_LIMIT") {
+    throw new GoogleMapsServiceError(
+      "Address service is busy. Please try again shortly.",
+      429,
+      "GOOGLE_MAPS_RATE_LIMITED"
+    );
+  }
+  throw new GoogleMapsServiceError("Address service is unavailable");
 }
 
 export async function autocompletePlaces(
@@ -243,6 +273,8 @@ export async function reverseGeocode(coordinates: Coordinates): Promise<Resolved
     }>;
   }>(`https://maps.googleapis.com/maps/api/geocode/json?${params}`);
 
+  assertGeocodeStatus(payload);
+
   const first = payload.results?.[0];
   const result = {
     formattedAddress: first?.formatted_address || "",
@@ -279,6 +311,7 @@ export async function geocodeAddress(address: string): Promise<ResolvedPlace> {
     components: `country:${countryCode.toUpperCase()}`,
   });
   const payload = await googleFetch<{
+    status?: string;
     results?: Array<{
       formatted_address?: string;
       place_id?: string;
@@ -290,6 +323,7 @@ export async function geocodeAddress(address: string): Promise<ResolvedPlace> {
       geometry?: { location?: { lat?: number; lng?: number } };
     }>;
   }>(`https://maps.googleapis.com/maps/api/geocode/json?${params}`);
+  assertGeocodeStatus(payload);
   const first = payload.results?.[0];
   const result = {
     formattedAddress: first?.formatted_address || "",

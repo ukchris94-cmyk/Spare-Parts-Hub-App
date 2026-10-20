@@ -249,6 +249,84 @@ async function loadBargainMessages(offerId: string) {
   return rows.map(mapBargainMessage);
 }
 
+router.get("/vendor-summary", requireAuthenticated, async (req: Request, res: Response) => {
+  if (req.user?.role !== "vendor") {
+    return res.status(403).json({ ok: false, message: "Only vendors can view their inventory summary" });
+  }
+
+  const vendorId = req.user.id;
+  try {
+    const [totals, highlights, lowStock] = await Promise.all([
+      query<{
+        total_items: number;
+        inventory_value: string;
+        low_stock_count: number;
+      }>(
+        `SELECT COUNT(*)::int AS total_items,
+                COALESCE(SUM(COALESCE(price_ngn, 0)::bigint * GREATEST(COALESCE(stock_qty, 0), 0)), 0)::text AS inventory_value,
+                COUNT(*) FILTER (WHERE stock_qty BETWEEN 1 AND 3)::int AS low_stock_count
+         FROM parts
+         WHERE user_id = $1 AND role = 'vendor' AND listing_status = 'published'`,
+        [vendorId],
+      ),
+      query<{
+        id: string;
+        name: string;
+        description: string | null;
+        image_url: string | null;
+        price_ngn: number | null;
+        stock_qty: number | null;
+      }>(
+        `SELECT id, name, description, image_url, price_ngn, stock_qty
+         FROM parts
+         WHERE user_id = $1 AND role = 'vendor' AND listing_status = 'published'
+         ORDER BY created_at DESC, id DESC LIMIT 6`,
+        [vendorId],
+      ),
+      query<{
+        id: string;
+        name: string;
+        description: string | null;
+        image_url: string | null;
+        price_ngn: number | null;
+        stock_qty: number | null;
+      }>(
+        `SELECT id, name, description, image_url, price_ngn, stock_qty
+         FROM parts
+         WHERE user_id = $1 AND role = 'vendor' AND listing_status = 'published'
+           AND stock_qty BETWEEN 1 AND 3
+         ORDER BY stock_qty, name, id LIMIT 3`,
+        [vendorId],
+      ),
+    ]);
+
+    const displayed = [...highlights.rows, ...lowStock.rows];
+    const imageGalleries = await loadPartImageGalleries(req, displayed);
+    const mapPart = (row: typeof displayed[number]) => ({
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      imageUrl: imageGalleries.get(row.id)?.[0]?.url || publicPartImageUrl(req, row.id, row.image_url),
+      priceNgn: row.price_ngn,
+      stockQty: row.stock_qty,
+    });
+
+    return res.json({
+      ok: true,
+      stats: {
+        totalItems: totals.rows[0]?.total_items || 0,
+        inventoryValue: Number(totals.rows[0]?.inventory_value || 0),
+        lowStockCount: totals.rows[0]?.low_stock_count || 0,
+      },
+      highlights: highlights.rows.map(mapPart),
+      lowStockParts: lowStock.rows.map(mapPart),
+    });
+  } catch (error) {
+    req.log.error({ err: error, vendorId }, "Vendor inventory summary failed");
+    return res.status(500).json({ ok: false, message: "Could not load inventory summary" });
+  }
+});
+
 router.get("/search", async (req: Request, res: Response) => {
   const {
     query: q,

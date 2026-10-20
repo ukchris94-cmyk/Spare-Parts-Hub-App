@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "test:fitment": "npm run build && node --test dist/services/partFitment.test.js dist/services/partApplicability.test.js dist/services/fitmentBackfillDb.test.js dist/services/fitmentBackfill.integration.test.js dist/services/partBroadCompatibility.integration.test.js",
     "fitment:backfill": "node dist/scripts/fitment-backfill.js",
-    "test": "npm run build && node --test dist/services/phoneNumbers.test.js dist/services/messaging/awsSms.test.js dist/services/payments/fees.test.js dist/services/payments/monnify.test.js dist/services/partSearch.test.js dist/routes/auth.test.js",
+    "test": "npm run build && node --test dist/services/phoneNumbers.test.js dist/services/messaging/awsSms.test.js dist/services/payments/fees.test.js dist/services/payments/monnify.test.js dist/services/partSearch.test.js dist/services/googleMaps.test.js dist/routes/auth.test.js dist/routes/partsVendorSummary.test.js",
     "start": "node dist/server.js",
     "worker": "node dist/worker.js",
     "migrate": "npm run build && node dist/db/migrate.js",

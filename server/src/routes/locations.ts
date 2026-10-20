@@ -96,6 +96,9 @@ function mapVendorPickup(row: VendorPickupRow) {
 
 function handleGoogleMapsError(req: Request, res: Response, error: unknown): Response {
   if (error instanceof GoogleMapsServiceError) {
+    if (error.statusCode >= 500) {
+      req.log.error({ code: error.code, statusCode: error.statusCode }, "Google Maps service request failed");
+    }
     return res.status(error.statusCode).json({
       ok: false,
       code: error.code,
